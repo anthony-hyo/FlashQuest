@@ -9,7 +9,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "clean": "rm -rf dist",
     "build:dev": "bun run webpack --mode development",
-    "install-deps": "bun add pako && bun add -d @types/pako"
+    "install-deps": "bun add pako && bun add -d @types/pako",
+    "typecheck": "bun x tsc --noEmit"
   },
   "keywords": ["swf", "flash", "webgl", "renderer", "animation"],
   "author": "SWF Renderer Team",

@@ -97,7 +97,7 @@ export class DisplayList {
 
 export class Timeline {
 	private frames: Frame[] = [];
-	private currentFrame: number = 0;
+	private currentFrame: number = -1; // -1 means nothing executed yet
 	private displayList: DisplayList = new DisplayList();
 
 	addFrame(frame: Frame) {
@@ -105,7 +105,7 @@ export class Timeline {
 	}
 
 	getCurrentFrame(): number {
-		return this.currentFrame;
+		return this.currentFrame < 0 ? 0 : this.currentFrame;
 	}
 
 	getTotalFrames(): number {
@@ -117,30 +117,31 @@ export class Timeline {
 			return;
 		}
 
-		// Se estamos indo para trás, resetar display list
+		// If seeking backwards, reset and rebuild from start
 		if (frameNumber < this.currentFrame) {
 			this.displayList.clear();
-			this.currentFrame = 0;
+			this.currentFrame = -1;
 		}
 
-		// Executar todos os frames até o frame desejado
-		while (this.currentFrame <= frameNumber) {
-			const frame = this.frames[this.currentFrame];
+		// Execute frames incrementally up to requested frame
+		for (let i = this.currentFrame + 1; i <= frameNumber; i++) {
+			const frame = this.frames[i];
 			if (frame) {
 				this.executeFrame(frame);
 			}
-			this.currentFrame++;
+			this.currentFrame = i;
 		}
-
-		this.currentFrame = frameNumber;
 	}
 
 	nextFrame() {
-		if (this.currentFrame < this.frames.length - 1) {
-			this.gotoFrame(this.currentFrame + 1);
-		} else {
-			// Loop para o primeiro frame
+		if (this.frames.length === 0) return;
+		if (this.currentFrame >= this.frames.length - 1) {
+			// loop
+			this.displayList.clear();
+			this.currentFrame = -1;
 			this.gotoFrame(0);
+		} else {
+			this.gotoFrame(this.currentFrame + 1);
 		}
 	}
 
@@ -150,10 +151,8 @@ export class Timeline {
 
 	private executeFrame(frame: Frame) {
 		console.log(`Executing frame with ${frame.actions.length} actions`);
-		
 		for (const action of frame.actions) {
 			console.log(`Executing action: ${action.type}`, action.data);
-			
 			switch (action.type) {
 				case 'placeObject':
 					this.displayList.placeObject(action.data as PlaceObjectData);
@@ -171,7 +170,6 @@ export class Timeline {
 					console.log(`Defined shape ${(action.data as any).characterId}`);
 					break;
 				case 'defineBits':
-					// Handle bitmap definitions
 					console.log(`Defined bitmap ${(action.data as any).characterId}`);
 					break;
 				case 'setBackgroundColor':
@@ -179,7 +177,6 @@ export class Timeline {
 					break;
 			}
 		}
-		
 		console.log(`After frame execution: ${this.displayList.getObjects().length} objects in display list`);
 	}
 }

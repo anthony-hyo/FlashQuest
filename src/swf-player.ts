@@ -238,63 +238,75 @@ export class SWFPlayer {
 
 	private processDefineBits(tag: any, currentFrame: Frame) {
 		const data = tag.data;
-		let bitmapData: any;
+		let bitmapData: any = {};
 
 		try {
-			if (tag.code === SwfTagCode.DefineBits) {
-				const characterId = data.readUint16();
-				const bitmapFormat = data.readUint8();
-				const bitmapWidth = data.readUint16();
-				const bitmapHeight = data.readUint16();
-				const colorTableSize = data.readUint8();
-				const transparentColorIndex = data.readUint8();
-				const hasAlpha = (bitmapFormat & 0x20) !== 0;
+			data.position = 0;
+			data.bitPosition = 0;
 
-				bitmapData = {
-					characterId,
-					bitmapFormat,
-					bitmapWidth,
-					bitmapHeight,
-					colorTableSize,
-					transparentColorIndex,
-					hasAlpha
-				};
+			switch (tag.code) {
+				case SwfTagCode.DefineBitsJPEG2: { // 21
+					const characterId = data.readUint16();
+					const remainingLength = data.remaining;
+					const imageBytes = data.readBytes(remainingLength);
+					const byteArray = new Uint8Array(imageBytes.dataView.buffer);
+					bitmapData = { characterId, format: 'JPEG2', size: byteArray.length };
 
-				if (hasAlpha) {
-					// Alpha bitmap
-					data.readUint8(); // Skip reserved byte
-					bitmapData.alphaData = data.readBytes(bitmapWidth * bitmapHeight);
-				} else {
-					// Non-alpha bitmap
-					bitmapData.colorData = data.readBytes(bitmapWidth * bitmapHeight);
+					this.createTextureFromJPEG(characterId, byteArray);
+					break;
 				}
-
-			} else {
-				// JPEG or Lossless bitmap
-				const characterId = data.readUint16();
-				const bitmapDataLength = data.readUint32();
-				const bitmapDataStart = data.position;
-
-				bitmapData = {
-					characterId,
-					bitmapDataLength,
-					bitmapDataStart
-				};
-
-				data.position += bitmapDataLength; // Skip bitmap data
+				case SwfTagCode.DefineBitsJPEG3: { // 35
+					const characterId = data.readUint16();
+					const alphaDataOffset = data.readUint32();
+					const imageBytes = data.readBytes(alphaDataOffset);
+					// Remaining is alpha - ignoring for now
+					bitmapData = { characterId, format: 'JPEG3', alphaDataOffset };
+					const byteArray = new Uint8Array(imageBytes.dataView.buffer);
+					this.createTextureFromJPEG(characterId, byteArray); // ignoring alpha
+					break;
+				}
+				case SwfTagCode.DefineBits: // 6 (legacy JPEG without tables) - skip for now
+				case SwfTagCode.DefineBitsJPEG4: // 90
+				case SwfTagCode.DefineBitsLossless: // 20
+				case SwfTagCode.DefineBitsLossless2: { // 36
+					// Placeholder: complex formats (need zlib + color tables)
+					const characterId = data.readUint16();
+					bitmapData = { characterId, format: 'UNSUPPORTED' };
+					break;
+				}
+				default:
+					break;
 			}
 
-			const action: FrameAction = {
-				type: 'defineBits',
-				data: bitmapData
-			};
-
+			const action: FrameAction = { type: 'defineBits', data: bitmapData };
 			currentFrame.actions.push(action);
-
-			console.log(`DefineBits: characterId=${bitmapData.characterId}, format=${bitmapData.bitmapFormat}, size=${bitmapData.bitmapWidth}x${bitmapData.bitmapHeight}`);
-
+			console.log(`DefineBits tag processed:`, bitmapData);
 		} catch (error) {
 			console.warn('Erro ao processar DefineBits:', error);
+		}
+	}
+
+	private createTextureFromJPEG(characterId: number, bytes: Uint8Array) {
+		try {
+			// Ensure we provide an ArrayBuffer (not ArrayBufferLike) for Blob typing safety
+			const buffer = new ArrayBuffer(bytes.byteLength);
+			new Uint8Array(buffer).set(bytes);
+			const blob = new Blob([buffer], { type: 'image/jpeg' });
+			const url = URL.createObjectURL(blob);
+			const img = new Image();
+			img.onload = () => {
+				this.renderer.loadBitmapTexture(characterId, img);
+				URL.revokeObjectURL(url);
+				console.log(`Bitmap texture loaded for character ${characterId}`);
+				this.render();
+			};
+			img.onerror = () => {
+				console.warn('Failed to load JPEG image for character', characterId);
+				URL.revokeObjectURL(url);
+			};
+			img.src = url;
+		} catch (e) {
+			console.warn('createTextureFromJPEG error:', e);
 		}
 	}
 
