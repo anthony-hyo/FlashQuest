@@ -29,6 +29,13 @@ export class ShapeTagHandler extends BaseTagHandler {
     async handle(tag: TagData, frame: Frame, displayList: DisplayList): Promise<void> {
         try {
             const data = tag.data;
+            
+            // Check if we have enough data to read characterId
+            if (data.remaining < 2) {
+                console.warn(`[Shape] Insufficient data for characterId in tag ${tag.code}`);
+                return;
+            }
+            
             const characterId = data.readUint16();
 
             if (tag.code === SwfTagCode.DefineMorphShape || tag.code === SwfTagCode.DefineMorphShape2) {
@@ -39,12 +46,19 @@ export class ShapeTagHandler extends BaseTagHandler {
                     data: { characterId, morphShape }
                 });
             } else {
+                // Check if we have enough remaining data for shape parsing
+                if (data.remaining < 10) { // Minimum data for bounds + basic shape data
+                    console.warn(`[Shape] Insufficient data for shape parsing in tag ${tag.code}, characterId ${characterId}`);
+                    return;
+                }
+                
                 const shape = parseShape(data, tag.code);
                 frame.actions.push({
                     type: 'defineShape',
                     data: { characterId, shape }
                 });
                 displayList.addShape(characterId, shape);
+                console.log(`[Shape] Successfully parsed shape ${characterId} for tag ${tag.code}`);
             }
         } catch (error) {
             this.handleError(tag, error as Error);

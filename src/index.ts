@@ -1,6 +1,6 @@
 import { SWFPlayer } from './swf-player';
 
-// Exportar classes principais
+// Exportar classes principais - sistema modular consolidado
 export { SWFPlayer } from './swf-player';
 export { WebGLRenderer } from './gl/renderer';
 export { loadSwf } from './swf/loader';

@@ -31,7 +31,7 @@ export class SWFPlayer {
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
-        this.renderer = new WebGLRenderer(canvas);
+        this.renderer = new WebGLRenderer(canvas, 2048);
         this.soundHandler = new SoundHandler();
         this.spriteHandler = new SpriteHandler();
         this.actionScriptHandler = new ActionScriptHandler();
@@ -186,26 +186,50 @@ export class SWFPlayer {
     private async buildTimeline(tags: TagData[]) {
         let currentFrame: Frame = { actions: [] };
         const displayList = new DisplayList();
-        const batchSize = 100; // Process tags in batches for better performance
         
-        for (let i = 0; i < tags.length; i += batchSize) {
-            const batch = tags.slice(i, i + batchSize);
-            await Promise.all(batch.map(async tag => {
-                try {
-                    const handler = this.tagHandlers.getHandler(tag.code);
-                    if (handler) {
-                        await handler.handle(tag, currentFrame, displayList);
-                    } else if (tag.code === SwfTagCode.ShowFrame) {
-                        this.timeline.addFrame(currentFrame);
-                        currentFrame = { actions: [] };
-                    } else if (tag.code === SwfTagCode.End && currentFrame.actions.length > 0) {
+        console.log('[Build Timeline] Processing', tags.length, 'tags');
+        
+        // Process tags sequentially to avoid data corruption
+        for (let i = 0; i < tags.length; i++) {
+            const tag = tags[i];
+            
+            // Skip processing if tag data is corrupted or insufficient
+            if (!tag.data || tag.data.remaining <= 0) {
+                console.warn(`[Build Timeline] Skipping tag ${this.getTagName(tag.code)} (${tag.code}) - insufficient data`);
+                continue;
+            }
+            
+            try {
+                const handler = this.tagHandlers.getHandler(tag.code);
+                if (handler) {
+                    await handler.handle(tag, currentFrame, displayList);
+                    console.log(`[Build Timeline] Successfully processed ${this.getTagName(tag.code)} (${tag.code})`);
+                } else if (tag.code === SwfTagCode.ShowFrame) {
+                    this.timeline.addFrame(currentFrame);
+                    currentFrame = { actions: [] };
+                    console.log('[Build Timeline] ShowFrame - frame added');
+                } else if (tag.code === SwfTagCode.End) {
+                    if (currentFrame.actions.length > 0) {
                         this.timeline.addFrame(currentFrame);
                     }
-                } catch (error) {
-                    console.error(`Error processing tag ${tag.code}:`, error);
+                    console.log('[Build Timeline] End tag reached');
+                    break; // Stop processing after End tag
+                } else {
+                    console.log(`[Build Timeline] No handler for tag ${this.getTagName(tag.code)} (${tag.code})`);
                 }
-            }));
+            } catch (error) {
+                console.error(`Error processing tag ${this.getTagName(tag.code)} (${tag.code}):`, error);
+                // Continue processing other tags instead of failing completely
+            }
         }
+        
+        // If we have actions but no frames, create a frame
+        if (currentFrame.actions.length > 0) {
+            this.timeline.addFrame(currentFrame);
+        }
+        
+        console.log('[Build Timeline] Total frames:', this.timeline.getTotalFrames());
+        console.log('[Build Timeline] Display list has', displayList.getObjects().length, 'objects');
     }
 
     private getTagName(code: number): string {
@@ -420,14 +444,34 @@ export class SWFPlayer {
         const displayList = this.timeline.getDisplayList();
         const objects = displayList.getObjects();
 
+        console.log('[Render] Display list objects:', objects.length);
+        console.log('[Render] Objects details:', objects.map(obj => ({
+            characterId: obj.characterId,
+            depth: obj.depth,
+            visible: obj.visible,
+            hasShape: !!obj.shape,
+            shapeBounds: obj.shape?.bounds
+        })));
+
         if (objects.length === 0) {
+            console.warn('[Render] No objects in display list - trying to create test content');
             this.renderer.render([]);
             return;
         }
 
         // Batch objects by type for more efficient rendering
         const renderBatch = objects
-            .filter(obj => obj.visible && obj.shape)
+            .filter(obj => {
+                const shouldRender = obj.visible && obj.shape;
+                if (!shouldRender) {
+                    console.log('[Render] Filtering out object:', { 
+                        characterId: obj.characterId, 
+                        visible: obj.visible, 
+                        hasShape: !!obj.shape 
+                    });
+                }
+                return shouldRender;
+            })
             .sort((a, b) => a.depth - b.depth)
             .map(obj => ({
                 shape: obj.shape!,
@@ -440,6 +484,7 @@ export class SWFPlayer {
                 isMask: obj.clipDepth !== undefined
             }));
 
+        console.log('[Render] Rendering batch:', renderBatch.length, 'objects');
         this.renderer.render(renderBatch);
     }
 }

@@ -8,18 +8,37 @@ export interface Color {
     a: number;
 }
 
+export interface NormalizedColor {
+    r: number; // 0-1
+    g: number; // 0-1
+    b: number; // 0-1
+    a: number; // 0-1
+}
+
+export enum FillStyleType {
+    Solid = 0x00,
+    LinearGradient = 0x10,
+    RadialGradient = 0x12,
+    FocalGradient = 0x13,
+    RepeatingBitmap = 0x40,
+    ClippedBitmap = 0x41,
+    NonSmoothedRepeatingBitmap = 0x42,
+    NonSmoothedClippedBitmap = 0x43
+}
+
 export interface FillStyle {
-    type: number;
-    color?: Color;
+    type: FillStyleType;
+    color?: NormalizedColor;
     gradient?: Gradient;
     bitmapId?: number;
     bitmapMatrix?: Matrix;
     matrix?: Matrix; // Add matrix property for gradient fills
+    repeating?: boolean; // For bitmap fills
 }
 
 export interface LineStyle {
     width: number;
-    color: Color;
+    color: NormalizedColor;
     startCapStyle?: number;
     joinStyle?: number;
     hasFillFlag?: boolean;
@@ -42,7 +61,7 @@ export interface Gradient {
 
 export interface GradientRecord {
     ratio: number;
-    color: Color;
+    color: NormalizedColor;
 }
 
 export interface ShapeRecord {
@@ -75,13 +94,46 @@ export interface MorphShape {
     };
 }
 
+// Utility functions for color handling
+export function createNormalizedColor(r: number, g: number, b: number, a: number = 1): NormalizedColor {
+    return { r, g, b, a };
+}
+
+export function lerpColor(start: NormalizedColor, end: NormalizedColor, ratio: number): NormalizedColor {
+    return {
+        r: end.r * ratio + start.r * (1 - ratio),
+        g: end.g * ratio + start.g * (1 - ratio),
+        b: end.b * ratio + start.b * (1 - ratio),
+        a: end.a * ratio + start.a * (1 - ratio)
+    };
+}
+
+export function colorToHex(color: NormalizedColor): string {
+    const r = Math.round(color.r * 255);
+    const g = Math.round(color.g * 255);
+    const b = Math.round(color.b * 255);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
 export function parseShape(data: Bytes, shapeVersion: number): Shape {
     const bounds = data.readRect();
-
-    // Para DefineShape4, ler edge bounds e use fill winding rule
+    
+    // Para DefineShape4, ler edge bounds e flags corretamente (bit a bit)
     if (shapeVersion === SwfTagCode.DefineShape4) {
-        data.readRect(); // edgeBounds (unused)
-        data.readUint8(); // usesFillWindingRule (unused)
+        // EdgeBounds (RECT)
+        const edgeBounds = data.readRect();
+        // Flags: UB[5] reserved, UB[1] UsesFillWindingRule, UB[1] UsesNonScalingStrokes, UB[1] UsesScalingStrokes
+        // Ler bit a bit para não desalinha o stream
+        data.readUnsignedBits(5); // reserved
+        const usesFillWindingRule = data.readBit();
+        const usesNonScalingStrokes = data.readBit();
+        const usesScalingStrokes = data.readBit();
+        // Alinhar para o próximo byte antes de ler arrays
+        data.align();
+        void edgeBounds; void usesFillWindingRule; void usesNonScalingStrokes; void usesScalingStrokes;
+    } else {
+        // Outros formatos: alinhar antes dos arrays
+        data.align();
     }
 
     const fillStyles = parseFillStyles(data, shapeVersion);
@@ -114,6 +166,12 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         }
         fillStyleCount = data.readUint16();
     }
+    
+    // Safety check for unreasonable fill style counts
+    if (fillStyleCount > 100) {
+        console.warn(`[SWF] Suspiciously high fill style count: ${fillStyleCount}, possibly corrupted data. Attempting recovery...`);
+        return attemptColorRecovery(data, shapeVersion);
+    }
 
     for (let i = 0; i < fillStyleCount; i++) {
         if (data.eof) {
@@ -122,65 +180,129 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         }
         
         const fillType = data.readUint8();
-        const fillStyle: FillStyle = { type: fillType };
-
-        switch (fillType) {
-            case 0x00: // Solid fill
-                const colorBytes = shapeVersion >= SwfTagCode.DefineShape3 ? 4 : 3;
-                if (data.remaining < colorBytes) {
-                    console.warn(`[SWF] Insufficient data for solid fill color in fill style ${i + 1}`);
-                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Magenta for debug
-                } else {
-                    fillStyle.color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
-                }
-                break;
-
-            case 0x10: // Linear gradient
-            case 0x12: // Radial gradient
-            case 0x13: // Focal radial gradient (SWF 8+)
-                // Check if we have enough data for matrix and gradient
-                if (data.remaining < 10) { // Rough estimate for minimum matrix + gradient data
-                    console.warn(`[SWF] Insufficient data for gradient fill in fill style ${i + 1}`);
-                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
-                    break;
-                }
-                try {
-                    fillStyle.bitmapMatrix = data.readMatrix();
-                    fillStyle.gradient = parseGradient(data, fillType, shapeVersion);
-                } catch (error) {
-                    console.warn(`[SWF] Error parsing gradient in fill style ${i + 1}:`, error);
-                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
-                }
-                break;
-
-            case 0x40: // Repeating bitmap
-            case 0x41: // Clipped bitmap
-            case 0x42: // Non-smoothed repeating bitmap
-            case 0x43: // Non-smoothed clipped bitmap
-                if (data.remaining < 12) { // 2 bytes for bitmap ID + minimum matrix data
-                    console.warn(`[SWF] Insufficient data for bitmap fill in fill style ${i + 1}`);
-                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
-                    break;
-                }
-                try {
-                    fillStyle.bitmapId = data.readUint16();
-                    fillStyle.bitmapMatrix = data.readMatrix();
-                } catch (error) {
-                    console.warn(`[SWF] Error parsing bitmap fill in fill style ${i + 1}:`, error);
-                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
-                }
-                break;
-
-            default:
-                console.warn(`Tipo de fill desconhecido: ${fillType}`);
-                fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Magenta para debug
-                break;
+        
+        try {
+            const fillStyle = parseSingleFillStyle(data, fillType as FillStyleType, shapeVersion);
+            fillStyles.push(fillStyle);
+        } catch (error) {
+            console.error(`[SWF] Error parsing fill style ${i + 1}: ${error}`);
+            // Add a fallback solid color
+            fillStyles.push({
+                type: FillStyleType.Solid,
+                color: createNormalizedColor(1, 0, 0, 1) // Red fallback
+            });
+            break; // Stop parsing to prevent further corruption
         }
-
-        fillStyles.push(fillStyle);
     }
 
     return fillStyles;
+}
+
+function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
+    // Try to find valid color data by scanning for typical color patterns
+    const startPos = data.position - 1;
+    console.log(`[SWF] Attempting color recovery from position ${startPos}`);
+    
+    try {
+        data.position = startPos;
+        const rawBytes: number[] = [];
+        for (let i = 0; i < Math.min(30, data.remaining); i++) {
+            rawBytes.push(data.readUint8());
+        }
+        console.log(`[SWF] Raw bytes: ${rawBytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+        
+        // Look for SWF fill style patterns
+        let recoveredColor: NormalizedColor | null = null;
+        
+        for (let i = 0; i < rawBytes.length - 4; i++) {
+            if (rawBytes[i] === FillStyleType.Solid) {
+                // Found solid fill type marker
+                const r = rawBytes[i + 1] / 255;
+                const g = rawBytes[i + 2] / 255; 
+                const b = rawBytes[i + 3] / 255;
+                const color = createNormalizedColor(r, g, b, 1);
+                console.log(`[SWF] Recovered solid fill: RGB(${rawBytes[i + 1]}, ${rawBytes[i + 2]}, ${rawBytes[i + 3]}) = ${JSON.stringify(color)}`);
+                recoveredColor = color;
+                break;
+            }
+        }
+        
+        // If no marker found, look for reasonable RGB sequences
+        if (!recoveredColor) {
+            console.log(`[SWF] No fill type marker found, analyzing RGB patterns:`);
+            for (let i = 0; i < rawBytes.length - 2; i++) {
+                const r = rawBytes[i] / 255;
+                const g = rawBytes[i + 1] / 255;
+                const b = rawBytes[i + 2] / 255;
+                
+                // Skip unlikely color patterns
+                if (isValidColorPattern(r, g, b)) {
+                    recoveredColor = createNormalizedColor(r, g, b, 1);
+                    console.log(`[SWF] Recovered RGB pattern: RGB(${Math.round(r*255)}, ${Math.round(g*255)}, ${Math.round(b*255)})`);
+                    break;
+                }
+            }
+        }
+        
+        return [{
+            type: FillStyleType.Solid,
+            color: recoveredColor || createNormalizedColor(1, 0, 0, 1) // Red fallback
+        }];
+    } catch (e) {
+        console.error(`[SWF] Error during color recovery: ${e}`);
+        return [{
+            type: FillStyleType.Solid,
+            color: createNormalizedColor(1, 0, 0, 1) // Red fallback
+        }];
+    }
+}
+
+function isValidColorPattern(r: number, g: number, b: number): boolean {
+    // Skip patterns that are likely not colors
+    if (r === g && g === b && (r < 0.04 || r > 0.96)) return false; // Very dark or bright uniform
+    if (r === 0 && g === 0 && b === 0) return false; // Pure black
+    if (r === 1 && g === 1 && b === 1) return false; // Pure white
+    return r > 0.02 || g > 0.02 || b > 0.02; // At least some color
+}
+
+function parseSingleFillStyle(data: Bytes, fillType: FillStyleType, shapeVersion: number): FillStyle {
+    const fillStyle: FillStyle = { type: fillType };
+
+    switch (fillType) {
+        case FillStyleType.Solid:
+            const colorBytes = shapeVersion >= SwfTagCode.DefineShape3 ? 4 : 3;
+            if (data.remaining < colorBytes) {
+                throw new Error(`Insufficient data for solid fill color`);
+            }
+            fillStyle.color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
+            break;
+
+        case FillStyleType.LinearGradient:
+        case FillStyleType.RadialGradient:
+        case FillStyleType.FocalGradient:
+            fillStyle.matrix = data.readMatrix();
+            fillStyle.gradient = parseGradient(data, fillType, shapeVersion);
+            break;
+
+        case FillStyleType.RepeatingBitmap:
+        case FillStyleType.NonSmoothedRepeatingBitmap:
+            fillStyle.repeating = true;
+            fillStyle.bitmapId = data.readUint16();
+            fillStyle.bitmapMatrix = data.readMatrix();
+            break;
+            
+        case FillStyleType.ClippedBitmap:
+        case FillStyleType.NonSmoothedClippedBitmap:
+            fillStyle.repeating = false;
+            fillStyle.bitmapId = data.readUint16();
+            fillStyle.bitmapMatrix = data.readMatrix();
+            break;
+
+        default:
+            throw new Error(`Unknown fill type: 0x${(fillType as number).toString(16)}`);
+    }
+
+    return fillStyle;
 }
 
 function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
@@ -200,6 +322,12 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
             return lineStyles;
         }
         lineStyleCount = data.readUint16();
+    }
+    
+    // Safety check for unreasonable line style counts
+    if (lineStyleCount > 50) {
+        console.warn(`[SWF] Suspiciously high line style count: ${lineStyleCount}, possibly corrupted data. Skipping line styles.`);
+        return lineStyles;
     }
 
     for (let i = 0; i < lineStyleCount; i++) {
@@ -322,15 +450,30 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
 
     data.align();
 
+    if (data.remaining < 1) {
+        console.warn('[SWF] No data remaining for shape records');
+        return records;
+    }
+
     const numFillBits = data.readUnsignedBits(4);
     const numLineBits = data.readUnsignedBits(4);
+    
+    console.log('[SWF] Shape records - numFillBits:', numFillBits, 'numLineBits:', numLineBits, 'remaining data:', data.remaining);
 
     let currentX = 0;
     let currentY = 0;
     let fillBits = numFillBits;
     let lineBits = numLineBits;
+    
+    let recordCount = 0;
 
-    while (true) {
+    while (true && recordCount < 100) { // Add safety limit
+        if (data.eof || data.remaining < 1) {
+            console.warn('[SWF] No more data for shape records, stopping');
+            break;
+        }
+        
+        recordCount++;
         const typeFlag = data.readBit();
 
         if (typeFlag === 0) {
@@ -380,9 +523,11 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
             }
 
             records.push(record);
+            console.log('[SWF] Added style change record:', record);
 
             // Verificar fim dos registros
             if (!stateNewStyles && !stateLineStyle && !stateFillStyle1 && !stateFillStyle0 && !stateMoveTo) {
+                console.log('[SWF] End of shape records detected');
                 break;
             }
 
@@ -412,10 +557,12 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
                 currentX += deltaX;
                 currentY += deltaY;
 
-                records.push({
-                    type: 'straightEdge',
+                const straightRecord = {
+                    type: 'straightEdge' as const,
                     lineTo: { x: currentX, y: currentY }
-                });
+                };
+                records.push(straightRecord);
+                console.log('[SWF] Added straight edge record:', straightRecord);
 
             } else {
                 // Curved edge
@@ -433,19 +580,22 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
                 currentX = anchorX;
                 currentY = anchorY;
 
-                records.push({
-                    type: 'curvedEdge',
+                const curvedRecord = {
+                    type: 'curvedEdge' as const,
                     curveTo: {
                         controlX,
                         controlY,
                         anchorX,
                         anchorY
                     }
-                });
+                };
+                records.push(curvedRecord);
+                console.log('[SWF] Added curved edge record:', curvedRecord);
             }
         }
     }
 
+    console.log('[SWF] Shape records parsing complete. Total records:', records.length);
     return records;
 }
 
@@ -467,11 +617,11 @@ export function parseMorphShape(bytes: Bytes): MorphShape {
     };
 }
 
-function readColor(data: Bytes, hasAlpha: boolean): Color {
+function readColor(data: Bytes, hasAlpha: boolean): NormalizedColor {
     const r = data.readUint8() / 255;
     const g = data.readUint8() / 255;
     const b = data.readUint8() / 255;
     const a = hasAlpha ? data.readUint8() / 255 : 1;
 
-    return { r, g, b, a };
+    return createNormalizedColor(r, g, b, a);
 }

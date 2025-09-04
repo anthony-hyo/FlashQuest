@@ -1,9 +1,15 @@
 import { Shape, Color, FillStyle } from '../swf/shapes';
+import earcut from 'earcut';
 import { Matrix, ColorTransform } from '../utils/bytes';
 import { MorphShape } from '../swf/morph-shapes';
+import { SpriteInstance } from '../swf/display';
+
+// Flash uses 20 twips per pixel; convert all geometry to pixel space
+const TWIPS_PER_PIXEL = 20;
 
 export interface RenderObject {
-    shape: Shape | MorphShape;
+    shape?: Shape | MorphShape;
+    sprite?: SpriteInstance;
     matrix?: Matrix;
     colorTransform?: ColorTransform;
     depth: number;
@@ -20,7 +26,7 @@ class RenderBatch {
     private indices: number[] = [];
     private indexCount: number = 0;
     private quadCount: number = 0;
-    private readonly BATCH_SIZE: number;
+    private readonly BATCH_SIZE!: number;
 
     constructor(size: number) {
         this.BATCH_SIZE = size;
@@ -97,105 +103,55 @@ class RenderBatch {
 }
 
 export class WebGLRenderer {
-    private canvas: HTMLCanvasElement;
-    private gl: WebGLRenderingContext;
-
+    private canvas!: HTMLCanvasElement;
+    private gl!: WebGLRenderingContext;
     // Shader programs
-    private shaderProgram: WebGLProgram;          // solid
-    private gradientShaderProgram: WebGLProgram;  // gradient
-    private bitmapShaderProgram: WebGLProgram;    // bitmap
-    private colorTransformShaderProgram: WebGLProgram; // color transform
-    private filterShaderProgram: WebGLProgram;    // filters
-    
-    // Cache for render batches to improve performance
-    private batchCache: Map<string, Float32Array> = new Map();
-    private lastFrameObjects: string = '';
-
-    private maskStack: RenderObject[] = [];
-    private frameBuffer: WebGLFramebuffer | null = null;
-    private maskTexture: WebGLTexture | null = null;
-    private batchManager: RenderBatch;
-    private readonly BATCH_SIZE = 1024; // Maximum number of quads per batch
-
-    // Shader attributes and uniforms
-    private aVertexPosition: number;
-    private aVertexColor: number;
-    private uProjectionMatrix: WebGLUniformLocation;
-    private uModelViewMatrix: WebGLUniformLocation;
-    private aGradientPosition: number;
-    private aGradientUV: number;
-    private uGradientProjectionMatrix: WebGLUniformLocation;
-    private uGradientModelViewMatrix: WebGLUniformLocation;
-    private uGradientColors: WebGLUniformLocation;
-    private uGradientStops: WebGLUniformLocation;
-    private uGradientType: WebGLUniformLocation;
-    private uGradientFocalPoint: WebGLUniformLocation;
-    private aBitmapPosition: number;
-    private aBitmapUV: number;
-    private uBitmapProjectionMatrix: WebGLUniformLocation;
-    private uBitmapModelViewMatrix: WebGLUniformLocation;
-    private uBitmapTexture: WebGLUniformLocation;
-    
+    private shaderProgram!: WebGLProgram; // solid
+    private gradientShaderProgram!: WebGLProgram;
+    private bitmapShaderProgram!: WebGLProgram;
+    private colorTransformShaderProgram!: WebGLProgram;
+    private filterShaderProgram!: WebGLProgram;
     // Buffers
-    private vertexBuffer: WebGLBuffer;
-    private colorBuffer: WebGLBuffer;
-    private uvBuffer: WebGLBuffer;
-    
-    // State
-    private backgroundColor: Color = { r: 1, g: 1, b: 1, a: 1 };
-
-    // Textures storage
+    private vertexBuffer!: WebGLBuffer;
+    private colorBuffer!: WebGLBuffer;
+    private uvBuffer!: WebGLBuffer;
+    // Framebuffer and mask
+    private frameBuffer!: WebGLFramebuffer;
+    private maskTexture!: WebGLTexture;
+    // Texture management
     private textures: Map<number, WebGLTexture> = new Map();
+    // Background color
+    private backgroundColor: Color = { r: 1, g: 1, b: 1, a: 1 };
+    // Batch manager
+    private batchManager!: RenderBatch;
+    // Uniforms and attributes
+    private uProjectionMatrix!: WebGLUniformLocation;
+    private uModelViewMatrix!: WebGLUniformLocation;
+    private aVertexPosition!: number;
+    private aVertexColor!: number;
+    // Mask stack
+    private maskStack: any[] = [];
 
-    constructor(canvas: HTMLCanvasElement) {
+    constructor(canvas: HTMLCanvasElement, size: number = 2048) {
         this.canvas = canvas;
-        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-        if (!gl) throw new Error('WebGL não suportado');
-        this.gl = gl as WebGLRenderingContext;
-
-        // Init shaders
+        this.gl = canvas.getContext('webgl')!;
+        this.batchManager = new RenderBatch(size);
+        // Initialize solid shader and assign all locations
         const solid = this.initSolidShaders();
         this.shaderProgram = solid.program;
         this.aVertexPosition = solid.aVertexPosition;
         this.aVertexColor = solid.aVertexColor;
         this.uProjectionMatrix = solid.uProjectionMatrix;
         this.uModelViewMatrix = solid.uModelViewMatrix;
-
-        const grad = this.initGradientShaders();
-        this.gradientShaderProgram = grad.program;
-        this.aGradientPosition = grad.aGradientPosition;
-        this.aGradientUV = grad.aGradientUV;
-        this.uGradientProjectionMatrix = grad.uGradientProjectionMatrix;
-        this.uGradientModelViewMatrix = grad.uGradientModelViewMatrix;
-        this.uGradientColors = grad.uGradientColors;
-        this.uGradientStops = grad.uGradientStops;
-        this.uGradientType = grad.uGradientType;
-        this.uGradientFocalPoint = grad.uGradientFocalPoint;
-
-        const bmp = this.initBitmapShaders();
-        this.bitmapShaderProgram = bmp.program;
-        this.aBitmapPosition = bmp.aBitmapPosition;
-        this.aBitmapUV = bmp.aBitmapUV;
-        this.uBitmapProjectionMatrix = bmp.uBitmapProjectionMatrix;
-        this.uBitmapModelViewMatrix = bmp.uBitmapModelViewMatrix;
-        this.uBitmapTexture = bmp.uBitmapTexture;
-
-        const colorTransform = this.initColorTransformShaders();
-        this.colorTransformShaderProgram = colorTransform.program;
-        
-        const filter = this.initFilterShaders();
-        this.filterShaderProgram = filter.program;
-
-        // Buffers
-        const buffers = this.initBuffers();
-        this.vertexBuffer = buffers.vertexBuffer;
-        this.colorBuffer = buffers.colorBuffer;
-        this.uvBuffer = buffers.uvBuffer;
-
+        // Init optional shaders (not strictly required yet)
+        try { this.gradientShaderProgram = this.initGradientShaders().program; } catch {}
+        try { this.bitmapShaderProgram = this.initBitmapShaders().program; } catch {}
+        // Create buffers
+        this.vertexBuffer = this.gl.createBuffer()!;
+        this.colorBuffer = this.gl.createBuffer()!;
+        this.uvBuffer = this.gl.createBuffer()!;
+        // Initial viewport
         this.setupViewport();
-        this.initFramebuffer();
-
-        this.batchManager = new RenderBatch(this.BATCH_SIZE);
     }
 
     private initFramebuffer() {
@@ -408,6 +364,8 @@ export class WebGLRenderer {
 
     // ---------------- Render Loop ----------------
     render(objects: RenderObject[]) {
+        // Keep viewport in sync with canvas size
+        this.setupViewport();
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
 
         // Sort objects by material type and depth for optimal batching
@@ -418,7 +376,7 @@ export class WebGLRenderer {
         });
 
         // Process objects in batches
-        let currentBatch = [];
+        let currentBatch = [] as RenderObject[];
         let currentMaterial = '';
         
         for (const obj of sortedObjects) {
@@ -453,16 +411,43 @@ export class WebGLRenderer {
     }
 
     private getMaterialKey(obj: RenderObject): string {
+        // Handle sprites separately
+        if (obj.sprite) {
+            return 'sprite';
+        }
+        
+        if (!obj.shape) {
+            return 'empty';
+        }
+        
         const shape = 'startShape' in obj.shape ? obj.shape.startShape : obj.shape;
-        const fillStyle = shape.fillStyles[0];
+        
+        // Try to get active fill style based on shape records analysis
+        let fillStyle;
+        if (shape && shape.fillStyles && shape.fillStyles.length > 0) {
+            // For now use first fill style - TODO: implement proper active fill tracking
+            fillStyle = shape.fillStyles[0];
+        }
+        
         if (!fillStyle) return 'solid:none';
         
+        let materialKey: string;
         switch (fillStyle.type) {
-            case 0x00: return `solid:${fillStyle.color?.r},${fillStyle.color?.g},${fillStyle.color?.b},${fillStyle.color?.a}`;
-            case 0x10: case 0x12: case 0x13: return `gradient:${fillStyle.type}`;
-            case 0x40: case 0x41: case 0x42: case 0x43: return `bitmap:${fillStyle.bitmapId}`;
-            default: return 'solid:none';
+            case 0x00: 
+                materialKey = `solid:${fillStyle.color?.r},${fillStyle.color?.g},${fillStyle.color?.b},${fillStyle.color?.a}`;
+                break;
+            case 0x10: case 0x12: case 0x13: 
+                materialKey = `gradient:${fillStyle.type}`;
+                break;
+            case 0x40: case 0x41: case 0x42: case 0x43: 
+                materialKey = `bitmap:${fillStyle.bitmapId}`;
+                break;
+            default: 
+                materialKey = 'solid:none';
+                break;
         }
+        
+        return materialKey;
     }
 
     private flushBatch(objects: RenderObject[], materialKey: string) {
@@ -471,6 +456,12 @@ export class WebGLRenderer {
         const [type, ...params] = materialKey.split(':');
         
         switch (type) {
+            case 'sprite':
+                this.flushSpriteBatch(objects);
+                break;
+            case 'empty':
+                // Skip empty objects
+                break;
             case 'solid':
                 this.flushSolidBatch(objects);
                 break;
@@ -485,58 +476,485 @@ export class WebGLRenderer {
         this.batchManager.clear();
     }
 
-    private flushSolidBatch(objects: RenderObject[]) {
-        this.gl.useProgram(this.shaderProgram);
+    private flushSpriteBatch(objects: RenderObject[]) {
+        console.log(`[flushSpriteBatch] Rendering ${objects.length} sprite objects`);
         
+        for (const obj of objects) {
+            if (!obj.sprite) continue;
+            
+            this.renderSprite(obj);
+        }
+    }
+
+    private renderSprite(obj: RenderObject) {
+        if (!obj.sprite) return;
+        
+        const sprite = obj.sprite;
+        console.log(`[renderSprite] Rendering sprite ${obj.characterId} at frame ${sprite.currentFrame}/${sprite.definition.frameCount}`);
+        
+        // Update sprite animation
+        if (sprite.playing && sprite.definition.frameCount > 1) {
+            sprite.currentFrame = (sprite.currentFrame + 1) % sprite.definition.frameCount;
+        }
+        
+        // Get current frame data
+        const timeline = sprite.definition.timeline;
+        const frames = (timeline as any).frames || [];
+        const frameData = frames[sprite.currentFrame];
+        
+        if (frameData) {
+            // Process frame actions to update sprite's display list
+            this.processFrameForSprite(frameData, sprite);
+            
+            // Render sprite's display list with sprite's transform
+            const spriteObjects = this.convertDisplayListToRenderObjects(sprite.displayList, obj.matrix, obj.colorTransform);
+            
+            if (spriteObjects.length > 0) {
+                console.log(`[renderSprite] Rendering ${spriteObjects.length} child objects`);
+                this.render(spriteObjects);
+            }
+        }
+    }
+
+    private processFrameForSprite(frame: any, sprite: SpriteInstance) {
+        for (const action of frame.actions || []) {
+            switch (action.type) {
+                case 'placeObject':
+                    sprite.displayList.placeObject(action.data);
+                    break;
+                case 'removeObject':
+                    sprite.displayList.removeObject(action.data.depth);
+                    break;
+                case 'defineShape':
+                    sprite.displayList.addShape(action.data.characterId, action.data);
+                    break;
+                case 'defineMorphShape':
+                    sprite.displayList.addMorphShape(action.data.characterId, action.data);
+                    break;
+                case 'defineSprite':
+                    sprite.displayList.addSprite(action.data.characterId, action.data);
+                    break;
+            }
+        }
+    }
+
+    private convertDisplayListToRenderObjects(displayList: any, parentMatrix?: Matrix, parentColorTransform?: ColorTransform): RenderObject[] {
+        const objects: RenderObject[] = [];
+        const displayObjects = displayList.getObjects();
+        
+        for (const obj of displayObjects) {
+            // Combine parent and child transforms
+            let combinedMatrix = obj.matrix;
+            if (parentMatrix) {
+                combinedMatrix = this.multiplyMatrices(parentMatrix, obj.matrix);
+            }
+            
+            let combinedColorTransform = obj.colorTransform;
+            if (parentColorTransform && obj.colorTransform) {
+                combinedColorTransform = this.combineColorTransforms(parentColorTransform, obj.colorTransform);
+            } else if (parentColorTransform) {
+                combinedColorTransform = parentColorTransform;
+            }
+            
+            const renderObject: RenderObject = {
+                characterId: obj.characterId,
+                depth: obj.depth,
+                matrix: combinedMatrix,
+                colorTransform: combinedColorTransform,
+                shape: obj.shape,
+                sprite: obj.sprite,
+                ratio: obj.ratio
+            };
+            
+            objects.push(renderObject);
+        }
+        
+        return objects;
+    }
+
+    private multiplyMatrices(a: Matrix, b: Matrix): Matrix {
+        // Convert from Flash matrix format (scaleX, scaleY, rotateSkew0, rotateSkew1, translateX, translateY)
+        // to standard 2D transform matrix format for multiplication
+        return {
+            scaleX: a.scaleX * b.scaleX + a.rotateSkew1 * b.rotateSkew0,
+            rotateSkew0: a.rotateSkew0 * b.scaleX + a.scaleY * b.rotateSkew0,
+            rotateSkew1: a.scaleX * b.rotateSkew1 + a.rotateSkew1 * b.scaleY,
+            scaleY: a.rotateSkew0 * b.rotateSkew1 + a.scaleY * b.scaleY,
+            translateX: a.scaleX * b.translateX + a.rotateSkew1 * b.translateY + a.translateX,
+            translateY: a.rotateSkew0 * b.translateX + a.scaleY * b.translateY + a.translateY
+        };
+    }
+
+    private combineColorTransforms(parent: ColorTransform, child: ColorTransform): ColorTransform {
+        return {
+            redMultiplier: parent.redMultiplier * child.redMultiplier,
+            greenMultiplier: parent.greenMultiplier * child.greenMultiplier,
+            blueMultiplier: parent.blueMultiplier * child.blueMultiplier,
+            alphaMultiplier: parent.alphaMultiplier * child.alphaMultiplier,
+            redOffset: parent.redOffset + child.redOffset,
+            greenOffset: parent.greenOffset + child.greenOffset,
+            blueOffset: parent.blueOffset + child.blueOffset,
+            alphaOffset: parent.alphaOffset + child.alphaOffset
+        };
+    }
+
+    private flushSolidBatch(objects: RenderObject[]) {
+        if (!this.shaderProgram) {
+            console.error('[flushSolidBatch] No valid shader program in use');
+            return;
+        }
+        this.gl.useProgram(this.shaderProgram);
         // Set up shared uniforms
         const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
         this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
 
+        let drewAny = false;
         for (const obj of objects) {
+            if (!obj.shape) continue; // Add null check
+            
             const data = this.triangulateShape(obj.shape);
+            if (!data.vertices || data.vertices.length === 0 || !data.indices || data.indices.length === 0) {
+                console.warn('[flushSolidBatch] Skipping empty triangulation for object', obj);
+                continue;
+            }
             const modelView = this.createModelViewMatrix(obj.matrix);
             this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
 
-            // Add to batch
-            for (let i = 0; i < data.vertices.length; i += 6) {
-                const color = {
-                    r: data.colors[i * 2],
-                    g: data.colors[i * 2 + 1],
-                    b: data.colors[i * 2 + 2],
-                    a: data.colors[i * 2 + 3]
-                };
+            // Upload vertex data (xy per vertex)
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(data.vertices), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexPosition);
 
-                if (!this.batchManager.addQuad(
-                    data.vertices[i], data.vertices[i + 1],
-                    data.vertices[i + 2], data.vertices[i + 3],
-                    data.vertices[i + 4], data.vertices[i + 5],
-                    data.vertices[i + 6], data.vertices[i + 7],
-                    color,
-                    {u: 0, v: 0}, {u: 1, v: 0},
-                    {u: 1, v: 1}, {u: 0, v: 1}
-                )) {
-                    // Batch is full, flush it and start a new one
-                    this.renderBatch();
-                    this.batchManager.clear();
-                    i -= 6; // Retry this quad
+            // Upload color data (rgba per vertex)
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(data.colors), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexColor);
+
+            // Upload indices and draw
+            const indexBuffer = this.gl.createBuffer()!;
+            this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+            this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(data.indices), this.gl.DYNAMIC_DRAW);
+            this.gl.drawElements(this.gl.TRIANGLES, data.indices.length, this.gl.UNSIGNED_SHORT, 0);
+            this.gl.deleteBuffer(indexBuffer);
+            drewAny = true;
+
+            // Attempt stroke/outline rendering
+            this.renderOutline(obj);
+        }
+        if (!drewAny) {
+            console.warn('[flushSolidBatch] No valid geometry to render');
+        }
+    }
+
+    private renderOutline(obj: RenderObject) {
+        if (!obj.shape) return; // Add null check
+        
+        const shape = ('startShape' in obj.shape) ? obj.shape.startShape : obj.shape;
+        if (!shape || !shape.lineStyles || shape.lineStyles.length === 0) return;
+        const path = this.getOutlinePath(shape);
+        if (path.length < 4) return;
+
+        // Use first line style for now
+        const ls = shape.lineStyles[0];
+        const widthPx = (ls.width || 20) / TWIPS_PER_PIXEL; // width is twips
+        const col = this.applyColorTransform(ls.color || { r: 0, g: 0, b: 0, a: 1 }, obj.colorTransform);
+
+        // Build thin quads along path segments as a simple stroke emulation
+        // For simplicity, render as GL_LINES using the color attribute (no width), approximating outline.
+        // Many drivers ignore lineWidth > 1 for WebGL1, so GL_LINES will be 1px. We’ll expand to quads later.
+
+        // Prepare color array per vertex
+        const vcount = path.length / 2;
+        const colors: number[] = [];
+        for (let i = 0; i < vcount; i++) colors.push(col.r, col.g, col.b, col.a);
+
+        // Upload buffers
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(path), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(colors), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
+        // Set matrices
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        const modelView = this.createModelViewMatrix(obj.matrix);
+        this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+
+        // Draw as line strip (1px). Later we can expand each segment to quads for thickness.
+        this.gl.drawArrays(this.gl.LINE_STRIP, 0, vcount);
+    }
+
+    // Enhanced border rendering methods
+    private renderSingleLineStyle(obj: RenderObject, lineStyle: any, styleIndex: number) {
+        if (!obj.shape) return; // Add null check
+        
+        const shape = ('startShape' in obj.shape) ? obj.shape.startShape : obj.shape;
+        const path = this.getOutlinePathForLineStyle(shape, styleIndex + 1); // SWF uses 1-based indices
+        if (path.length < 4) return;
+
+        const widthPx = Math.max(1, (lineStyle.width || 20) / TWIPS_PER_PIXEL);
+        const col = this.applyColorTransform(lineStyle.color || { r: 0, g: 0, b: 0, a: 1 }, obj.colorTransform);
+        
+        console.log(`[renderSingleLineStyle] Line style ${styleIndex}: width=${widthPx}px, color=`, col);
+
+        // For thick lines, create quad strips; for thin lines, use simple line rendering
+        if (widthPx > 2) {
+            this.renderThickLine(path, widthPx, col, obj.matrix);
+        } else {
+            this.renderThinLine(path, col, obj.matrix);
+        }
+    }
+
+    private getOutlinePathForLineStyle(shape: any, lineStyleIndex: number): number[] {
+        const path: number[] = [];
+        let currentX = 0, currentY = 0;
+        let currentLineStyle = 0;
+
+        for (const record of shape.records || []) {
+            if (record.type === 'styleChange') {
+                if (record.moveTo) {
+                    currentX = record.moveTo.x;
+                    currentY = record.moveTo.y;
+                }
+                if (record.lineStyle !== undefined) {
+                    currentLineStyle = record.lineStyle;
+                }
+                
+                // Start new path segment if this line style matches
+                if (currentLineStyle === lineStyleIndex) {
+                    path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
+                }
+            } else if (currentLineStyle === lineStyleIndex) {
+                if (record.type === 'straightEdge' && record.lineTo) {
+                    currentX = record.lineTo.x;
+                    currentY = record.lineTo.y;
+                    path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
+                } else if (record.type === 'curvedEdge' && record.curveTo) {
+                    // Tessellate curve into line segments
+                    const segments = this.tessellateQuadraticCurve(
+                        currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL,
+                        record.curveTo.controlX / TWIPS_PER_PIXEL, record.curveTo.controlY / TWIPS_PER_PIXEL,
+                        record.curveTo.anchorX / TWIPS_PER_PIXEL, record.curveTo.anchorY / TWIPS_PER_PIXEL
+                    );
+                    path.push(...segments);
+                    currentX = record.curveTo.anchorX;
+                    currentY = record.curveTo.anchorY;
                 }
             }
         }
 
-        // Render final batch
-        this.renderBatch();
+        return path;
+    }
+
+    private tessellateQuadraticCurve(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number): number[] {
+        const segments: number[] = [];
+        const steps = 8; // Number of segments to tessellate curve
+        
+        for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            const oneMinusT = 1 - t;
+            const x = oneMinusT * oneMinusT * x0 + 2 * oneMinusT * t * x1 + t * t * x2;
+            const y = oneMinusT * oneMinusT * y0 + 2 * oneMinusT * t * y1 + t * t * y2;
+            segments.push(x, y);
+        }
+        
+        return segments;
+    }
+
+    private renderThickLine(path: number[], width: number, color: any, matrix?: any) {
+        // Create quad strips for thick lines (implemented as triangles)
+        const { vertices, indices, colors } = this.createLineQuads(path, width, color);
+        
+        if (vertices.length === 0) return;
+
+        // Apply matrix transformation if present
+        if (matrix) {
+            for (let i = 0; i < vertices.length; i += 2) {
+                const x = vertices[i];
+                const y = vertices[i + 1];
+                vertices[i] = matrix.a * x + matrix.c * y + matrix.tx;
+                vertices[i + 1] = matrix.b * x + matrix.d * y + matrix.ty;
+            }
+        }
+
+        // Create temporary index buffer
+        const indexBuffer = this.gl.createBuffer()!;
+
+        // Render as triangles
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(vertices), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(colors), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
+        this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), this.gl.DYNAMIC_DRAW);
+
+        // Set matrices
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        const modelView = this.createModelViewMatrix(matrix);
+        this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+
+        this.gl.drawElements(this.gl.TRIANGLES, indices.length, this.gl.UNSIGNED_SHORT, 0);
+
+        // Clean up temporary buffer
+        this.gl.deleteBuffer(indexBuffer);
+    }
+
+    private renderThinLine(path: number[], color: any, matrix?: any) {
+        // Prepare color array per vertex
+        const vcount = path.length / 2;
+        const colors: number[] = [];
+        for (let i = 0; i < vcount; i++) colors.push(color.r, color.g, color.b, color.a);
+
+        // Upload buffers
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(path), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(colors), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
+        // Set matrices
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        const modelView = this.createModelViewMatrix(matrix);
+        this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+
+        // Draw as line strip
+        this.gl.drawArrays(this.gl.LINE_STRIP, 0, vcount);
+    }
+
+    private createLineQuads(path: number[], width: number, color: any): { vertices: number[], indices: number[], colors: number[] } {
+        if (path.length < 4) return { vertices: [], indices: [], colors: [] };
+
+        const vertices: number[] = [];
+        const indices: number[] = [];
+        const colors: number[] = [];
+        const halfWidth = width / 2;
+
+        for (let i = 0; i < path.length - 2; i += 2) {
+            const x1 = path[i], y1 = path[i + 1];
+            const x2 = path[i + 2], y2 = path[i + 3];
+            
+            // Calculate perpendicular vector
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const length = Math.sqrt(dx * dx + dy * dy);
+            if (length < 0.001) continue;
+            
+            const perpX = -dy / length * halfWidth;
+            const perpY = dx / length * halfWidth;
+            
+            // Create quad vertices
+            const baseIndex = vertices.length / 2;
+            
+            // Quad vertices (2 triangles)
+            vertices.push(
+                x1 + perpX, y1 + perpY,  // Top left
+                x1 - perpX, y1 - perpY,  // Bottom left
+                x2 + perpX, y2 + perpY,  // Top right
+                x2 - perpX, y2 - perpY   // Bottom right
+            );
+            
+            // Triangle indices
+            indices.push(
+                baseIndex, baseIndex + 1, baseIndex + 2,
+                baseIndex + 1, baseIndex + 3, baseIndex + 2
+            );
+            
+            // Colors for all 4 vertices
+            for (let j = 0; j < 4; j++) {
+                colors.push(color.r, color.g, color.b, color.a);
+            }
+        }
+
+        return { vertices, indices, colors };
     }
 
     private flushGradientBatch(objects: RenderObject[]) {
-        this.gl.useProgram(this.gradientShaderProgram);
-        // Implementation similar to flushSolidBatch but using gradient shader
-        // TODO: Complete gradient rendering implementation
+        // Fallback: render gradients as solid using first stop color
+        this.gl.useProgram(this.shaderProgram);
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        for (const obj of objects) {
+            if (!obj.shape) continue; // Add null check
+            
+            const data = this.triangulateShape(obj.shape);
+            if (!data.vertices.length || !data.indices.length) continue;
+            // Approximate gradient with first color if present
+            const shape = ('startShape' in obj.shape) ? obj.shape.startShape : obj.shape;
+            let approx = { r: 1, g: 1, b: 1, a: 1 } as Color;
+            if (shape) {
+                const fs = shape.fillStyles?.[0];
+                if (fs?.gradient?.gradientRecords?.length) approx = fs.gradient.gradientRecords[0].color;
+            }
+            const colors: number[] = [];
+            for (let i = 0; i < data.vertices.length / 2; i++) {
+                colors.push(approx.r, approx.g, approx.b, approx.a);
+            }
+            const modelView = this.createModelViewMatrix(obj.matrix);
+            this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(data.vertices), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexPosition);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(colors), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexColor);
+            const indexBuffer = this.gl.createBuffer()!;
+            this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+            this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(data.indices), this.gl.DYNAMIC_DRAW);
+            this.gl.drawElements(this.gl.TRIANGLES, data.indices.length, this.gl.UNSIGNED_SHORT, 0);
+            this.gl.deleteBuffer(indexBuffer);
+        }
     }
 
     private flushBitmapBatch(objects: RenderObject[], bitmapId: number) {
-        this.gl.useProgram(this.bitmapShaderProgram);
-        // Implementation similar to flushSolidBatch but using bitmap shader
-        // TODO: Complete bitmap rendering implementation
+        // Fallback: render bitmap fills as solid magenta to indicate TODO
+        this.gl.useProgram(this.shaderProgram);
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        for (const obj of objects) {
+            if (!obj.shape) continue; // Add null check
+            
+            const data = this.triangulateShape(obj.shape);
+            if (!data.vertices.length || !data.indices.length) continue;
+            const colors = new Array((data.vertices.length / 2) * 4).fill(0);
+            // Magenta RGBA
+            for (let i = 0; i < colors.length; i += 4) { colors[i] = 1; colors[i + 2] = 1; colors[i + 3] = 1; }
+            const modelView = this.createModelViewMatrix(obj.matrix);
+            this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(data.vertices), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexPosition);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+            this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(colors), this.gl.DYNAMIC_DRAW);
+            this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+            this.gl.enableVertexAttribArray(this.aVertexColor);
+            const indexBuffer = this.gl.createBuffer()!;
+            this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+            this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(data.indices), this.gl.DYNAMIC_DRAW);
+            this.gl.drawElements(this.gl.TRIANGLES, data.indices.length, this.gl.UNSIGNED_SHORT, 0);
+            this.gl.deleteBuffer(indexBuffer);
+        }
     }
 
     private renderBatch() {
@@ -544,6 +962,15 @@ export class WebGLRenderer {
         const colors = this.batchManager.getColorData();
         const uvs = this.batchManager.getUVData();
         const indices = this.batchManager.getIndexData();
+
+        if (!vertices || vertices.length === 0 || !indices || indices.length === 0) {
+            console.warn('[renderBatch] Skipping draw: no vertex or index data');
+            return;
+        }
+        if (!this.shaderProgram) {
+            console.error('[renderBatch] No valid shader program in use');
+            return;
+        }
 
         // Upload vertex data
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
@@ -635,6 +1062,8 @@ export class WebGLRenderer {
         this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
 
         // Triangulate and render the mask shape
+        if (!mask.shape) return;
+        
         const data = this.triangulateShape(mask.shape);
         
         // Upload vertex data
@@ -680,85 +1109,255 @@ export class WebGLRenderer {
                 0, 0, 0, 1
             ]);
         }
+        // Convert Flash matrix to WebGL matrix; translate is in twips
+        const tx = (matrix.translateX || 0) / TWIPS_PER_PIXEL;
+        const ty = (matrix.translateY || 0) / TWIPS_PER_PIXEL;
         
-        // Convert Flash matrix to WebGL matrix
+        // Flash Matrix: [scaleX, rotateSkew0, rotateSkew1, scaleY, translateX, translateY]
+        // WebGL expects column-major 4x4 matrix
+        // Correct mapping for Flash 2D transform to WebGL:
+        // | scaleX    rotateSkew0  0  tx |
+        // | rotateSkew1  scaleY   0  ty |
+        // |    0          0       1   0 |
+        // |    0          0       0   1 |
         return new Float32Array([
-            matrix.scaleX || 1, matrix.rotateSkew0 || 0, 0, 0,
-            matrix.rotateSkew1 || 0, matrix.scaleY || 1, 0, 0,
-            0, 0, 1, 0,
-            matrix.translateX || 0, matrix.translateY || 0, 0, 1
+            matrix.scaleX || 1,         // m00 - x scale
+            matrix.rotateSkew1 || 0,    // m10 - y skew (row 1, col 0)
+            0,                          // m20 
+            0,                          // m30
+            matrix.rotateSkew0 || 0,    // m01 - x skew (row 0, col 1)
+            matrix.scaleY || 1,         // m11 - y scale
+            0,                          // m21
+            0,                          // m31
+            0,                          // m02
+            0,                          // m12
+            1,                          // m22
+            0,                          // m32
+            tx,                         // m03 - x translation
+            ty,                         // m13 - y translation  
+            0,                          // m23
+            1                           // m33
         ]);
     }
-    
+
+    private applyColorTransform(color: Color, ct?: ColorTransform): Color {
+        if (!ct) return color;
+        return {
+            r: Math.min(1, Math.max(0, color.r * ct.redMultiplier + (ct.redOffset || 0) / 255)),
+            g: Math.min(1, Math.max(0, color.g * ct.greenMultiplier + (ct.greenOffset || 0) / 255)),
+            b: Math.min(1, Math.max(0, color.b * ct.blueMultiplier + (ct.blueOffset || 0) / 255)),
+            a: Math.min(1, Math.max(0, color.a * ct.alphaMultiplier + (ct.alphaOffset || 0) / 255)),
+        };
+    }
+
+    private getOutlinePath(shape: Shape | MorphShape): number[] {
+        // For MorphShape, outline from startEdges if present
+        if ('startEdges' in shape && shape.startEdges?.vertices?.length) {
+            return shape.startEdges.vertices.map((v: number) => v / TWIPS_PER_PIXEL);
+        }
+        const path: number[] = [];
+        let currentX = 0, currentY = 0;
+        let started = false;
+        for (const record of (shape as Shape).records) {
+            if (record.type === 'styleChange' && record.moveTo) {
+                currentX = record.moveTo.x; currentY = record.moveTo.y;
+                path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
+                started = true;
+            } else if (record.type === 'straightEdge' && record.lineTo) {
+                currentX = record.lineTo.x; currentY = record.lineTo.y;
+                if (!started) { path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL); started = true; }
+                else { path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL); }
+            } else if (record.type === 'curvedEdge' && record.curveTo) {
+                // Approximate curve by its anchor point
+                currentX = record.curveTo.anchorX; currentY = record.curveTo.anchorY;
+                if (!started) { path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL); started = true; }
+                else { path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL); }
+            }
+        }
+        return path;
+    }
+
     private triangulateShape(shape: Shape | MorphShape): { vertices: number[], indices: number[], colors: number[] } {
-        // Implementation for shape triangulation
-        // This is a placeholder implementation; in a real application, this would properly triangulate the shape
-        
-        // For MorphShape, we need to handle differently
+        // For MorphShape, use startEdges for now (TODO: interpolate for ratio)
         if ('startEdges' in shape) {
-            // This is a MorphShape - use startEdges for now
-            // In a complete implementation, you would interpolate between start and end shapes based on ratio
+            if (!shape.startEdges.vertices || shape.startEdges.vertices.length < 6) {
+                console.warn('[triangulateShape] MorphShape has no valid startEdges.vertices:', shape);
+                return { vertices: [], indices: [], colors: [] };
+            }
+            const scaledVerts = shape.startEdges.vertices.map((v: number, i: number) => i % 2 === 0 ? v / TWIPS_PER_PIXEL : v / TWIPS_PER_PIXEL);
             return {
-                vertices: shape.startEdges.vertices,
+                vertices: scaledVerts,
                 indices: shape.startEdges.indices,
-                colors: new Array(shape.startEdges.vertices.length * 2).fill(1.0) // Default white color
+                colors: new Array((scaledVerts.length / 2) * 4).fill(1.0)
             };
         }
+
+        // Regular Shape: collect polygon path from records with proper fill style tracking
+        const contours: Array<{path: number[], fillIndex: number}> = [];
+        let currentPath: number[] = [];
+        let currentX = 0, currentY = 0;
+        let currentFillStyle0 = 0, currentFillStyle1 = 0;
+        let activeFillIndex = 0; // Track the primary fill style (0-based)
         
-        // Regular Shape
-        const vertices: number[] = [];
-        const indices: number[] = [];
-        const colors: number[] = [];
-        
-        // Extract vertices from shape records
-        let currentX = 0;
-        let currentY = 0;
-        let vertexIndex = 0;
-        
-        // Process shape records to extract vertices
         for (const record of shape.records) {
-            if (record.type === 'styleChange' && record.moveTo) {
-                currentX = record.moveTo.x;
-                currentY = record.moveTo.y;
-                vertices.push(currentX, currentY);
+            if (record.type === 'styleChange') {
+                // Handle style changes and moves
+                if (record.moveTo) {
+                    // Finish current path if it exists
+                    if (currentPath.length >= 6) {
+                        contours.push({path: currentPath, fillIndex: activeFillIndex});
+                    }
+                    // Start new path
+                    currentX = record.moveTo.x;
+                    currentY = record.moveTo.y;
+                    currentPath = [currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL];
+                }
                 
-                // Add default color (white)
-                colors.push(1.0, 1.0, 1.0, 1.0);
-                vertexIndex++;
+                // Update fill styles (SWF uses 1-based indices, convert to 0-based)
+                if (record.fillStyle0 !== undefined) {
+                    currentFillStyle0 = record.fillStyle0;
+                }
+                if (record.fillStyle1 !== undefined) {
+                    currentFillStyle1 = record.fillStyle1;
+                }
+                
+                // Choose primary fill style (prefer fillStyle1, fallback to fillStyle0)
+                // Note: In SWF, 0 means "no fill", but if we have geometry and available fill styles,
+                // we should still try to render something
+                if (currentFillStyle1 > 0) {
+                    activeFillIndex = currentFillStyle1 - 1;
+                } else if (currentFillStyle0 > 0) {
+                    activeFillIndex = currentFillStyle0 - 1;
+                } else if (shape.fillStyles && shape.fillStyles.length > 0) {
+                    // Fallback: if no valid fill style but we have fill styles available, use the first one
+                    activeFillIndex = 0;
+                }
+                
             } else if (record.type === 'straightEdge' && record.lineTo) {
+                // Ensure we have a starting point
+                if (currentPath.length === 0) {
+                    currentPath.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
+                }
                 currentX = record.lineTo.x;
                 currentY = record.lineTo.y;
-                vertices.push(currentX, currentY);
-                
-                // Add default color (white)
-                colors.push(1.0, 1.0, 1.0, 1.0);
-                vertexIndex++;
-                
-                // Create triangle if we have enough vertices
-                if (vertexIndex >= 3) {
-                    indices.push(vertexIndex - 3, vertexIndex - 2, vertexIndex - 1);
-                }
+                currentPath.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
             } else if (record.type === 'curvedEdge' && record.curveTo) {
-                // For curves, add both control and anchor points
-                // In a real implementation, you'd tessellate the curve
+                // Ensure we have a starting point
+                if (currentPath.length === 0) {
+                    currentPath.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
+                }
+                // Approximate curve as line to anchor (TODO: proper curve tessellation)
                 currentX = record.curveTo.anchorX;
                 currentY = record.curveTo.anchorY;
-                vertices.push(record.curveTo.controlX, record.curveTo.controlY);
-                vertices.push(currentX, currentY);
-                
-                // Add default colors
-                colors.push(1.0, 1.0, 1.0, 1.0);
-                colors.push(1.0, 1.0, 1.0, 1.0);
-                vertexIndex += 2;
-                
-                // Create triangles if we have enough vertices
-                if (vertexIndex >= 3) {
-                    indices.push(vertexIndex - 3, vertexIndex - 2, vertexIndex - 1);
-                }
+                currentPath.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL);
             }
         }
         
-        return { vertices, indices, colors };
+        // Finish the last path
+        if (currentPath.length >= 6) {
+            contours.push({path: currentPath, fillIndex: activeFillIndex});
+        }
+        
+        // Combine all contours into a single path for now (TODO: handle holes properly)
+        const path: number[] = [];
+        let chosenFillIndex = 0;
+        for (const contour of contours) {
+            if (contour.path.length >= 6) {
+                path.push(...contour.path);
+                chosenFillIndex = contour.fillIndex; // Use last non-empty contour's fill
+            }
+        }
+
+        // Fallback: if no valid path but we have bounds, create a simple rectangle
+        if (path.length < 6 && (shape as Shape).bounds) {
+            const b = (shape as Shape).bounds;
+            const x0 = b.xMin / TWIPS_PER_PIXEL;
+            const y0 = b.yMin / TWIPS_PER_PIXEL;
+            const x1 = b.xMax / TWIPS_PER_PIXEL;
+            const y1 = b.yMax / TWIPS_PER_PIXEL;
+            const vertices = [x0, y0,  x1, y0,  x1, y1,  x0, y1];
+            const indices = [0,1,2, 0,2,3];
+            
+            // Use the correct fill style color
+            let color = { r: 1, g: 1, b: 1, a: 1 } as Color;
+            const fillStyles = (shape as Shape).fillStyles || [];
+            if (fillStyles.length > 0 && fillStyles[0]?.color) {
+                color = fillStyles[0].color;
+                console.log(`[triangulateShape] Found fill style color:`, color);
+                console.log(`[triangulateShape] RGB values: R=${Math.round(color.r * 255)}, G=${Math.round(color.g * 255)}, B=${Math.round(color.b * 255)}`);
+            } else {
+                console.log(`[triangulateShape] No fill styles available, using white fallback`);
+            }
+            
+            const colors: number[] = [];
+            for (let i = 0; i < 4; i++) colors.push(color.r, color.g, color.b, color.a);
+            console.warn('[triangulateShape] Using bounds fallback rectangle with color:', color);
+            return { vertices, indices, colors };
+        }
+
+        // Alternative fallback: if we have some path data but not enough for triangulation,
+        // try to create a simple shape from available points
+        if (path.length >= 4 && path.length < 6) {
+            console.warn('[triangulateShape] Insufficient points for polygon, creating line-based shape');
+            // Convert line to thin rectangle for rendering
+            const x1 = path[0], y1 = path[1];
+            const x2 = path[2], y2 = path[3];
+            const thickness = 0.1; // 0.1 pixel thickness
+            
+            // Create perpendicular vector for thickness
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = len > 0 ? -dy / len * thickness : thickness;
+            const ny = len > 0 ? dx / len * thickness : 0;
+            
+            const vertices = [
+                x1 + nx, y1 + ny,  // Top left
+                x2 + nx, y2 + ny,  // Top right  
+                x2 - nx, y2 - ny,  // Bottom right
+                x1 - nx, y1 - ny   // Bottom left
+            ];
+            const indices = [0,1,2, 0,2,3];
+            
+            let color = { r: 1, g: 1, b: 1, a: 1 } as Color;
+            const fillStyles = (shape as Shape).fillStyles || [];
+            if (fillStyles.length > 0 && fillStyles[0]?.color) {
+                color = fillStyles[0].color;
+            }
+            
+            const colors: number[] = [];
+            for (let i = 0; i < 4; i++) colors.push(color.r, color.g, color.b, color.a);
+            return { vertices, indices, colors };
+        }
+
+        if (path.length < 6) {
+            console.warn('[triangulateShape] Not enough points to form a polygon:', shape);
+            return { vertices: [], indices: [], colors: [] };
+        }
+
+        // Use earcut to triangulate the polygon
+        let indices: number[] = [];
+        try {
+            indices = earcut(path);
+        } catch (e) {
+            console.error('[triangulateShape] Earcut triangulation failed:', e, path);
+            return { vertices: [], indices: [], colors: [] };
+        }
+
+    // Assign color (use active fill style if available, else first, else white)
+    let color = { r: 1, g: 1, b: 1, a: 1 } as Color;
+    const fillStyles = (shape as Shape).fillStyles || [];
+    const picked = (chosenFillIndex !== undefined && fillStyles[chosenFillIndex]) ? fillStyles[chosenFillIndex] : fillStyles[0];
+    
+    if (picked?.color) {
+        color = picked.color;
+    }
+        const colors: number[] = [];
+        for (let i = 0; i < path.length / 2; i++) {
+            colors.push(color.r, color.g, color.b, color.a);
+        }
+
+        return { vertices: path, indices, colors };
     }
 
     /**

@@ -26,6 +26,8 @@
     "webpack-dev-server": "^5.2.2"
   },
   "dependencies": {
+    "@types/earcut": "^3.0.0",
+    "earcut": "^3.0.2",
     "pako": "^2.1.0"
   },
   "optionalDependencies": {

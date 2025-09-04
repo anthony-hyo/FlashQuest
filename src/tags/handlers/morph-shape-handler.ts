@@ -92,15 +92,27 @@ export class MorphShapeHandler extends BaseTagHandler {
     }
 
     private readMorphShape(data: any): Shape {
-        // Read fill style count
+        // Check for enough data for fill style count
+        if (data.remaining < 1) {
+            console.error('[MorphShape] Not enough data for fillStyleCount', { position: data.position, remaining: data.remaining });
+            throw new Error('Unexpected end of data (fillStyleCount)');
+        }
         const fillStyleCount = data.readUint8();
         const fillStyles = this.readFillStyles(data, fillStyleCount);
 
-        // Read line style count
+        // Check for enough data for line style count
+        if (data.remaining < 1) {
+            console.error('[MorphShape] Not enough data for lineStyleCount', { position: data.position, remaining: data.remaining });
+            throw new Error('Unexpected end of data (lineStyleCount)');
+        }
         const lineStyleCount = data.readUint8();
         const lineStyles = this.readLineStyles(data, lineStyleCount);
 
-        // Read shape records
+        // Defensive: check for at least 1 byte before reading shape records
+        if (data.remaining < 1) {
+            console.error('[MorphShape] Not enough data for shape records', { position: data.position, remaining: data.remaining });
+            throw new Error('Unexpected end of data (shapeRecords)');
+        }
         const records = this.readShapeRecords(data);
 
         return {
@@ -114,6 +126,10 @@ export class MorphShapeHandler extends BaseTagHandler {
     private readFillStyles(data: any, count: number): any[] {
         const styles = [];
         for (let i = 0; i < count; i++) {
+            if (data.remaining < 1) {
+                console.warn(`[MorphShape] Not enough data for fillStyle type at index ${i}`, { position: data.position, remaining: data.remaining });
+                break;
+            }
             const type = data.readUint8();
             switch (type) {
                 case 0x00: // Solid fill
@@ -124,6 +140,10 @@ export class MorphShapeHandler extends BaseTagHandler {
                     break;
                 case 0x10: // Linear gradient
                 case 0x12: // Radial gradient
+                    if (data.remaining < 6) { // matrix (at least 6 bytes)
+                        console.warn(`[MorphShape] Not enough data for gradient matrix at fillStyle ${i}`, { position: data.position, remaining: data.remaining });
+                        break;
+                    }
                     styles.push({
                         type,
                         matrix: data.readMatrix(),
@@ -134,11 +154,18 @@ export class MorphShapeHandler extends BaseTagHandler {
                 case 0x41:
                 case 0x42:
                 case 0x43:
+                    if (data.remaining < 2) {
+                        console.warn(`[MorphShape] Not enough data for bitmapId at fillStyle ${i}`, { position: data.position, remaining: data.remaining });
+                        break;
+                    }
                     styles.push({
                         type,
                         bitmapId: data.readUint16(),
                         matrix: data.readMatrix()
                     });
+                    break;
+                default:
+                    console.warn(`[MorphShape] Unknown fillStyle type ${type} at index ${i}`, { position: data.position });
                     break;
             }
         }
@@ -148,8 +175,21 @@ export class MorphShapeHandler extends BaseTagHandler {
     private readLineStyles(data: any, count: number): any[] {
         const styles = [];
         for (let i = 0; i < count; i++) {
+            if (data.remaining < 2) {
+                console.warn(`[MorphShape] Not enough data for lineStyle width at index ${i}`, { position: data.position, remaining: data.remaining });
+                break;
+            }
+            const width = data.readUint16();
+            if (data.remaining < 4) {
+                console.warn(`[MorphShape] Not enough data for RGBA color in lineStyle ${i}`, { position: data.position, remaining: data.remaining });
+                styles.push({
+                    width,
+                    color: { r: 0, g: 0, b: 0, a: 1 }
+                });
+                break;
+            }
             styles.push({
-                width: data.readUint16(),
+                width,
                 color: this.readRGBA(data)
             });
         }
@@ -158,9 +198,18 @@ export class MorphShapeHandler extends BaseTagHandler {
 
     private readShapeRecords(data: any): any[] {
         const records = [];
+        let safeGuard = 0;
         while (true) {
+            if (data.remaining < 1) {
+                console.warn('[MorphShape] Not enough data for shape record typeFlag', { position: data.position, remaining: data.remaining });
+                break;
+            }
             const typeFlag = data.readUBits(1);
             if (typeFlag === 0) {
+                if (data.remaining < 1) {
+                    console.warn('[MorphShape] Not enough data for shape record flags', { position: data.position, remaining: data.remaining });
+                    break;
+                }
                 const flags = data.readUBits(5);
                 if (flags === 0) break; // End of shape
 
@@ -172,6 +221,10 @@ export class MorphShapeHandler extends BaseTagHandler {
                 if (flags & 0x08) record.lineStyle = data.readUBits(4);
                 records.push(record);
             } else {
+                if (data.remaining < 1) {
+                    console.warn('[MorphShape] Not enough data for edge record', { position: data.position, remaining: data.remaining });
+                    break;
+                }
                 const straight = data.readUBits(1);
                 if (straight) {
                     records.push({
@@ -185,11 +238,22 @@ export class MorphShapeHandler extends BaseTagHandler {
                     });
                 }
             }
+            safeGuard++;
+            if (safeGuard > 10000) {
+                console.error('[MorphShape] Too many shape records, possible malformed data', { position: data.position });
+                break;
+            }
         }
         return records;
     }
 
     private readRGBA(data: any): Color {
+        // Check if we have enough data for RGBA (4 bytes)
+        if (data.remaining < 4) {
+            console.warn('[MorphShape] Insufficient data for RGBA color, using fallback');
+            return { r: 0, g: 0, b: 0, a: 1 }; // Fallback to black
+        }
+        
         return {
             r: data.readUint8() / 255,
             g: data.readUint8() / 255,
