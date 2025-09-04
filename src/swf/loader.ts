@@ -85,39 +85,31 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
 }
 
 async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
-    // Usar CompressionStream API se disponível
-    if ('DecompressionStream' in window) {
+    // Usar CompressionStream API se disponível (checar ambiente com segurança)
+    if (typeof DecompressionStream !== 'undefined') {
         try {
             const stream = new DecompressionStream('deflate');
             const writer = stream.writable.getWriter();
             const reader = stream.readable.getReader();
 
-            // Fix type issue by ensuring we have a proper Uint8Array
             const properArray = new Uint8Array(compressedData);
-            writer.write(properArray);
-            writer.close();
+            await writer.write(properArray);
+            await writer.close();
 
             const chunks: Uint8Array[] = [];
-            let done = false;
-
-            while (!done) {
-                const { value, done: readerDone } = await reader.read();
-                done = readerDone;
-                if (value) {
-                    chunks.push(value);
-                }
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                if (value) chunks.push(value);
             }
 
-            // Combinar chunks
             const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
             const result = new Uint8Array(totalLength);
             let offset = 0;
-
             for (const chunk of chunks) {
                 result.set(chunk, offset);
                 offset += chunk.length;
             }
-
             return result;
         } catch (error) {
             console.warn('Falha na descompressão nativa, usando fallback:', error);

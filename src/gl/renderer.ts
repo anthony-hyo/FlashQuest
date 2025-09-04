@@ -479,6 +479,10 @@ export class WebGLRenderer {
         this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projectionMatrix);
         this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelViewMatrix);
 
+        // Enable vertex attributes
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
         // Update vertex buffer
         this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
         this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(triangulation.vertices), this.gl.DYNAMIC_DRAW);
@@ -489,8 +493,32 @@ export class WebGLRenderer {
         this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(triangulation.colors), this.gl.DYNAMIC_DRAW);
         this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
 
+        // Validate data before drawing
+        const vertexCount = triangulation.vertices.length / 2;
+        const colorCount = triangulation.colors.length / 4;
+        
+        console.log(`Drawing ${vertexCount} vertices with ${colorCount} colors`);
+        console.log('First few vertices:', triangulation.vertices.slice(0, 6));
+        console.log('First few colors:', triangulation.colors.slice(0, 12));
+        
+        if (vertexCount !== colorCount) {
+            console.error('Vertex/color count mismatch!', { vertexCount, colorCount });
+            return;
+        }
+        
+        if (vertexCount === 0) {
+            console.warn('No vertices to draw');
+            return;
+        }
+
         // Draw triangles
-        this.gl.drawArrays(this.gl.TRIANGLES, 0, triangulation.vertices.length / 2);
+        this.gl.drawArrays(this.gl.TRIANGLES, 0, vertexCount);
+        
+        // Check for WebGL errors
+        const error = this.gl.getError();
+        if (error !== this.gl.NO_ERROR) {
+            console.error('WebGL error after drawing:', error);
+        }
     }
 
     private renderGradient(obj: RenderObject, triangulation: any, shape: Shape) {

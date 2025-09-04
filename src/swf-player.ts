@@ -119,7 +119,7 @@ export class SWFPlayer {
 			]
 		};
 
-		// Create a frame with the test shape
+		// Create a frame with the test shape - position it in the center of the screen
 		const frame: Frame = {
 			actions: [
 				{
@@ -134,12 +134,12 @@ export class SWFPlayer {
 						hasCharacter: true,
 						hasMatrix: true,
 						matrix: {
-							scaleX: 1,
-							scaleY: 1,
+							scaleX: 0.5, // Make it smaller
+							scaleY: 0.5,
 							rotateSkew0: 0,
 							rotateSkew1: 0,
-							translateX: 2000, // Center horizontally (100px from left)
-							translateY: 2000  // Center vertically (100px from top)
+							translateX: 4000, // Center in typical 800px canvas
+							translateY: 4000  // Center in typical 600px canvas
 						}
 					}
 				}
@@ -147,7 +147,8 @@ export class SWFPlayer {
 		};
 
 		this.timeline.addFrame(frame);
-		console.log('Test content created');
+		console.log('Test content created with shape bounds:', testShape.bounds);
+		console.log('Canvas dimensions:', this.canvas.width, 'x', this.canvas.height);
 	}
 
 	private buildTimeline(tags: any[]) {

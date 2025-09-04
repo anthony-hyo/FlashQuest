@@ -165,6 +165,11 @@ class SWFRenderer {
         return this.player.getTotalFrames();
     }
 
+    // Add testRenderer method to expose SWFPlayer's test functionality
+    testRenderer() {
+        this.player.testRenderer();
+    }
+
     destroy() {
         if (this.controls) {
             this.controls.remove();
