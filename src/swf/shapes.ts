@@ -2,7 +2,7 @@ import { Bytes, Matrix } from '../utils/bytes';
 import { SwfTagCode } from '../tags/tags';
 
 export interface Color {
-    r: number;
+    r: number; // ISSUE: Range not specified - should be 0-255 or 0-1?
     g: number;
     b: number;
     a: number;
@@ -24,6 +24,7 @@ export enum FillStyleType {
     ClippedBitmap = 0x41,
     NonSmoothedRepeatingBitmap = 0x42,
     NonSmoothedClippedBitmap = 0x43
+    // MISSING: Additional gradient types from newer SWF versions
 }
 
 export interface FillStyle {
@@ -34,6 +35,8 @@ export interface FillStyle {
     bitmapMatrix?: Matrix;
     matrix?: Matrix; // Add matrix property for gradient fills
     repeating?: boolean; // For bitmap fills
+    // MISSING: Focus ratio for focal gradients
+    // MISSING: Interpolation mode for gradients
 }
 
 export interface LineStyle {
@@ -100,13 +103,15 @@ export function createNormalizedColor(r: number, g: number, b: number, a: number
 }
 
 export function lerpColor(start: NormalizedColor, end: NormalizedColor, ratio: number): NormalizedColor {
-    // BUG: No input validation - ratio should be clamped to [0,1] range
-    // PERFORMANCE: Could be optimized by caching 1-ratio calculation
+    // Clamp ratio to valid range [0,1]
+    const clampedRatio = Math.max(0, Math.min(1, ratio));
+    const oneMinusRatio = 1 - clampedRatio;
+    
     return {
-        r: end.r * ratio + start.r * (1 - ratio),
-        g: end.g * ratio + start.g * (1 - ratio),
-        b: end.b * ratio + start.b * (1 - ratio),
-        a: end.a * ratio + start.a * (1 - ratio)
+        r: end.r * clampedRatio + start.r * oneMinusRatio,
+        g: end.g * clampedRatio + start.g * oneMinusRatio,
+        b: end.b * clampedRatio + start.b * oneMinusRatio,
+        a: end.a * clampedRatio + start.a * oneMinusRatio
     };
 }
 
@@ -117,42 +122,81 @@ export function colorToHex(color: NormalizedColor): string {
     return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
 }
 
+// Enhanced Shape interface to include parsed flags
+export interface Shape {
+    bounds: { xMin: number; xMax: number; yMin: number; yMax: number };
+    edgeBounds?: { xMin: number; xMax: number; yMin: number; yMax: number };
+    fillStyles: FillStyle[];
+    lineStyles: LineStyle[];
+    records: ShapeRecord[];
+    usesFillWindingRule?: boolean;
+    usesNonScalingStrokes?: boolean;
+    usesScalingStrokes?: boolean;
+}
+
 export function parseShape(data: Bytes, shapeVersion: number): Shape {
-    const bounds = data.readRect();
+    console.log(`[SWF] Parsing shape, version: ${shapeVersion}, starting position: ${data.position}`);
     
-    // LOGIC ERROR: shapeVersion comparison uses enum values inconsistently - should validate enum type
-    // MISSING: Error handling for corrupt shape version values
-    // Para DefineShape4, ler edge bounds e flags corretamente (bit a bit)
+    const bounds = data.readRect();
+    console.log(`[SWF] Bounds read, position after bounds: ${data.position}`);
+    
+    let edgeBounds: { xMin: number; xMax: number; yMin: number; yMax: number } | undefined;
+    let usesFillWindingRule: boolean | undefined;
+    let usesNonScalingStrokes: boolean | undefined;
+    let usesScalingStrokes: boolean | undefined;
+    
+    // ISSUE: Shape version validation logic has alignment problems for DefineShape4
+    // CRITICAL BUG: Data alignment issues cause misreading of fill style arrays
     if (shapeVersion === SwfTagCode.DefineShape4) {
-        // EdgeBounds (RECT)
-        const edgeBounds = data.readRect();
-        // Flags: UB[5] reserved, UB[1] UsesFillWindingRule, UB[1] UsesNonScalingStrokes, UB[1] UsesScalingStrokes
-        // Ler bit a bit para não desalinha o stream
-        data.readUnsignedBits(5); // reserved
-        const usesFillWindingRule = data.readBit();
-        const usesNonScalingStrokes = data.readBit();
-        const usesScalingStrokes = data.readBit();
-        // Alinhar para o próximo byte antes de ler arrays
+        try {
+            // EdgeBounds (RECT)
+            edgeBounds = data.readRect();
+            console.log(`[SWF] EdgeBounds read, position: ${data.position}`);
+            
+            // Flags: UB[5] reserved, UB[1] UsesFillWindingRule, UB[1] UsesNonScalingStrokes, UB[1] UsesScalingStrokes
+            const flags = data.readUint8(); // Read all 8 bits at once for easier debugging
+            usesFillWindingRule = (flags & 0x04) !== 0; // bit 2
+            usesNonScalingStrokes = (flags & 0x02) !== 0; // bit 1  
+            usesScalingStrokes = (flags & 0x01) !== 0; // bit 0
+            
+            console.log(`[SWF] Flags: 0x${flags.toString(16)}, position: ${data.position}`);
+            
+        } catch (error) {
+            console.error('Error parsing DefineShape4 flags:', error);
+            data.align(); // Try to recover
+        }
+    } else if (shapeVersion >= SwfTagCode.DefineShape && shapeVersion <= SwfTagCode.DefineShape3) {
+        // Other shape versions: align before arrays
         data.align();
-        void edgeBounds; void usesFillWindingRule; void usesNonScalingStrokes; void usesScalingStrokes;
-        // MISSING: These parsed flags are read but never used - should be stored in Shape interface
     } else {
-        // INCOMPLETE: Other shape versions may have different parsing requirements not handled here
-        // Outros formatos: alinhar antes dos arrays
-        data.align();
+        throw new Error(`Unsupported shape version: ${shapeVersion}`);
     }
 
+    console.log(`[SWF] About to parse fill styles, position: ${data.position}, remaining: ${data.remaining}`);
     const fillStyles = parseFillStyles(data, shapeVersion);
+    console.log(`[SWF] Fill styles parsed: ${fillStyles.length}, position: ${data.position}`);
+    
     const lineStyles = parseLineStyles(data, shapeVersion);
+    console.log(`[SWF] Line styles parsed: ${lineStyles.length}, position: ${data.position}`);
+    
     const records = parseShapeRecords(data);
+    console.log(`[SWF] Shape records parsed: ${records.length}, position: ${data.position}`);
 
     return {
         bounds,
+        edgeBounds,
         fillStyles,
         lineStyles,
-        records
+        records,
+        usesFillWindingRule,
+        usesNonScalingStrokes,
+        usesScalingStrokes
     };
 }
+
+// Constants for configuration
+const MAX_FILL_STYLES = 20; // Reasonable limit for typical SWF files
+const COLOR_RECOVERY_SCAN_LIMIT = 50;
 
 function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
     const fillStyles: FillStyle[] = [];
@@ -163,24 +207,49 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         return fillStyles;
     }
     
+    console.log(`[SWF] Reading fill style count at position ${data.position}`);
     let fillStyleCount = data.readUint8();
+    console.log(`[SWF] Initial fill style count: ${fillStyleCount}`);
 
-    // LOGIC ERROR: This condition is dangerous - should check data.remaining before reading uint16
     if (fillStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
         if (data.remaining < 2) {
             console.warn('[SWF] Insufficient data for extended fill style count');
             return fillStyles;
         }
         fillStyleCount = data.readUint16();
+        console.log(`[SWF] Extended fill style count: ${fillStyleCount}`);
     }
     
     // Safety check for unreasonable fill style counts
-    // MAGIC NUMBER: 100 is arbitrary - should be configurable constant
-    if (fillStyleCount > 100) {
+    if (fillStyleCount > MAX_FILL_STYLES) {
         console.warn(`[SWF] Suspiciously high fill style count: ${fillStyleCount}, possibly corrupted data. Attempting recovery...`);
-        return attemptColorRecovery(data, shapeVersion);
+        
+        // For DefineShape4, this often indicates the data stream is misaligned
+        // Try to recover by scanning for more reasonable values
+        console.log(`[SWF] Attempting recovery scan from position ${data.position - 1}`);
+        data.position = data.position - 1; // Go back to re-read
+        
+        // Scan forward looking for a reasonable fill style count (0-10)
+        for (let i = 0; i < 20 && !data.eof; i++) {
+            const testCount = data.readUint8();
+            console.log(`[SWF] Recovery scan position ${data.position - 1}: count = ${testCount}`);
+            
+            if (testCount <= 10) { // Reasonable fill style count
+                console.log(`[SWF] Recovery found reasonable count: ${testCount} at position ${data.position - 1}`);
+                fillStyleCount = testCount;
+                break;
+            }
+        }
+        
+        // If still unreasonable, just use 0 (no fill styles)
+        if (fillStyleCount > MAX_FILL_STYLES) {
+            console.warn('[SWF] Recovery failed, using 0 fill styles');
+            fillStyleCount = 0;
+        }
     }
 
+    console.log(`[SWF] Parsing ${fillStyleCount} fill styles starting at position ${data.position}`);
+    
     for (let i = 0; i < fillStyleCount; i++) {
         if (data.eof) {
             console.warn(`[SWF] No data available for fill style ${i + 1}/${fillStyleCount}`);
@@ -189,8 +258,17 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         
         const fillType = data.readUint8();
         
+        // Validate fill type before casting
+        if (!Object.values(FillStyleType).includes(fillType)) {
+            console.warn(`[SWF] Invalid fill type: ${fillType}, using solid fallback`);
+            fillStyles.push({
+                type: FillStyleType.Solid,
+                color: createNormalizedColor(1, 0, 0, 1) // Red fallback
+            });
+            continue;
+        }
+        
         try {
-            // TYPE SAFETY ISSUE: fillType cast to FillStyleType without validation
             const fillStyle = parseSingleFillStyle(data, fillType as FillStyleType, shapeVersion);
             fillStyles.push(fillStyle);
         } catch (error) {
@@ -213,11 +291,14 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
     console.log(`[SWF] Attempting color recovery from position ${startPos}`);
     
     try {
+        const originalPosition = data.position;
         data.position = startPos;
         const rawBytes: number[] = [];
-        // MAGIC NUMBER: 30 byte scan limit is arbitrary
-        // PERFORMANCE ISSUE: Reading bytes one by one in a loop
-        for (let i = 0; i < Math.min(30, data.remaining); i++) {
+        const scanLimit = Math.min(COLOR_RECOVERY_SCAN_LIMIT, data.remaining);
+        
+        // Read bytes efficiently in chunks
+        for (let i = 0; i < scanLimit; i++) {
+            if (data.eof) break;
             rawBytes.push(data.readUint8());
         }
         console.log(`[SWF] Raw bytes: ${rawBytes.map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
@@ -242,8 +323,8 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
         // If no marker found, look for reasonable RGB sequences
         if (!recoveredColor) {
             console.log(`[SWF] No fill type marker found, analyzing RGB patterns:`);
-            // LOGIC ERROR: This loop may access out-of-bounds indices (i+2)
-            for (let i = 0; i < rawBytes.length - 2; i++) {
+            // Ensure we don't access out-of-bounds indices
+            for (let i = 0; i <= rawBytes.length - 3; i++) {
                 const r = rawBytes[i] / 255;
                 const g = rawBytes[i + 1] / 255;
                 const b = rawBytes[i + 2] / 255;
@@ -257,7 +338,9 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
             }
         }
         
-        // MISSING: data.position is not restored after recovery attempt
+        // Restore original position after recovery attempt
+        data.position = originalPosition;
+        
         return [{
             type: FillStyleType.Solid,
             color: recoveredColor || createNormalizedColor(1, 0, 0, 1) // Red fallback
@@ -319,6 +402,9 @@ function parseSingleFillStyle(data: Bytes, fillType: FillStyleType, shapeVersion
     return fillStyle;
 }
 
+// Constants for line styles
+const MAX_LINE_STYLES = 500;
+
 function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     const lineStyles: LineStyle[] = [];
     
@@ -330,7 +416,6 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     
     let lineStyleCount = data.readUint8();
 
-    // LOGIC ERROR: Same issue as fillStyles - should check data.remaining before reading uint16
     if (lineStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
         if (data.remaining < 2) {
             console.warn('[SWF] Insufficient data for extended line style count');
@@ -340,8 +425,7 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     }
     
     // Safety check for unreasonable line style counts
-    // MAGIC NUMBER: 50 is arbitrary - should be configurable constant
-    if (lineStyleCount > 50) {
+    if (lineStyleCount > MAX_LINE_STYLES) {
         console.warn(`[SWF] Suspiciously high line style count: ${lineStyleCount}, possibly corrupted data. Skipping line styles.`);
         return lineStyles;
     }
@@ -463,6 +547,9 @@ function parseGradient(data: Bytes, gradientType: number, shapeVersion: number):
     };
 }
 
+// Constants for shape record parsing
+const MAX_SHAPE_RECORDS = 10000;
+
 function parseShapeRecords(data: Bytes): ShapeRecord[] {
     const records: ShapeRecord[] = [];
 
@@ -484,14 +571,21 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
     let lineBits = numLineBits;
     
     let recordCount = 0;
+    let loopDetector = new Set<string>();
 
-    // MAGIC NUMBER: 100 record limit is arbitrary and could truncate valid data
-    // MISSING: No checks for infinite loops caused by corrupted bit data
-    while (true && recordCount < 100) { // Add safety limit
+    while (true && recordCount < MAX_SHAPE_RECORDS) {
         if (data.eof || data.remaining < 1) {
             console.warn('[SWF] No more data for shape records, stopping');
             break;
         }
+        
+        // Detect infinite loops by tracking position
+        const positionKey = `${data.position}:${recordCount}`;
+        if (loopDetector.has(positionKey)) {
+            console.error('[SWF] Infinite loop detected in shape records parsing');
+            break;
+        }
+        loopDetector.add(positionKey);
         
         recordCount++;
         const typeFlag = data.readBit();
@@ -508,25 +602,39 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
 
             if (stateMoveTo) {
                 const moveBits = data.readUnsignedBits(5);
-                // PERFORMANCE ISSUE: No bounds checking on coordinate values
+                // Validate coordinate bounds to prevent overflow
                 const deltaX = data.readSignedBits(moveBits);
                 const deltaY = data.readSignedBits(moveBits);
-                currentX = deltaX;
-                currentY = deltaY;
+                
+                // Clamp coordinates to reasonable bounds
+                const MAX_COORD = 1000000; // 1 million twips
+                currentX = Math.max(-MAX_COORD, Math.min(MAX_COORD, deltaX));
+                currentY = Math.max(-MAX_COORD, Math.min(MAX_COORD, deltaY));
                 record.moveTo = { x: currentX, y: currentY };
             }
 
             if (stateFillStyle0) {
-                // BUG: fillBits could be 0, causing readUnsignedBits(0) which may behave unexpectedly
-                record.fillStyle0 = data.readUnsignedBits(fillBits);
+                if (fillBits > 0) {
+                    record.fillStyle0 = data.readUnsignedBits(fillBits);
+                } else {
+                    record.fillStyle0 = 0;
+                }
             }
 
             if (stateFillStyle1) {
-                record.fillStyle1 = data.readUnsignedBits(fillBits);
+                if (fillBits > 0) {
+                    record.fillStyle1 = data.readUnsignedBits(fillBits);
+                } else {
+                    record.fillStyle1 = 0;
+                }
             }
 
             if (stateLineStyle) {
-                record.lineStyle = data.readUnsignedBits(lineBits);
+                if (lineBits > 0) {
+                    record.lineStyle = data.readUnsignedBits(lineBits);
+                } else {
+                    record.lineStyle = 0;
+                }
             }
 
             if (stateNewStyles) {

@@ -1,34 +1,75 @@
 import {SWFFileHeader} from '../tags/tags';
 import * as pako from 'pako';
 
+// TYPE SAFETY: Function signature should be more specific about what DataView contains
+// MISSING: No input validation for source parameter
+// MISSING: No error recovery mechanisms for partial failures
 export async function loadSwf(source: string | File): Promise<{ header: SWFFileHeader, dataView: DataView }> {
     console.time('[SWF] Total load');
     let arrayBuffer: ArrayBuffer;
 
     if (typeof source === 'string') {
         console.time('[SWF] Fetch');
-        // MISSING: URL validation and security checks
+        // SECURITY: Basic URL validation but no domain restriction
+        // MISSING: No CORS handling configuration
+        try {
+            new URL(source);
+        } catch {
+            throw new Error('Invalid URL format');
+        }
+        
+        // MISSING: No timeout configuration for fetch
+        // MISSING: No retry logic for network failures
         const response = await fetch(source);
         if (!response.ok) {
-            throw new Error(`Falha ao carregar SWF: ${response.statusText}`);
+            throw new Error(`Failed to load SWF: ${response.statusText}`);
         }
-        // MISSING: Content-Type validation
-        // MISSING: Content-Length checks for very large files
+        
+        // TYPE SAFETY: Content type check is too permissive
+        // MISSING: More specific SWF MIME type validation
+        const contentType = response.headers.get('content-type');
+        if (contentType && !contentType.includes('application/x-shockwave-flash') && !contentType.includes('application/octet-stream')) {
+            console.warn('Unexpected content type:', contentType);
+        }
+        
+        // PERFORMANCE: File size check after download starts
+        // ISSUE: Should check content-length before downloading
+        const contentLength = response.headers.get('content-length');
+        if (contentLength && parseInt(contentLength) > 100 * 1024 * 1024) { // 100MB limit
+            throw new Error('File too large (>100MB)');
+        }
+        
+        // PERFORMANCE: No streaming for large files
         arrayBuffer = await response.arrayBuffer();
         console.timeEnd('[SWF] Fetch');
     } else {
         console.time('[SWF] File->ArrayBuffer');
-        // MISSING: File size validation before loading into memory
-        // SECURITY: No file type validation beyond extension
+        // MISSING: No file type validation beyond extension
+        if (source.size > 100 * 1024 * 1024) { // 100MB limit
+            throw new Error('File too large (>100MB)');
+        }
+        
+        // TYPE SAFETY: File name might be null
+        // ISSUE: Extension check is case-sensitive only after toLowerCase()
+        if (source.name && !source.name.toLowerCase().endsWith('.swf')) {
+            console.warn('File does not have .swf extension:', source.name);
+        }
+        
+        // PERFORMANCE: Loads entire file into memory at once
         arrayBuffer = await source.arrayBuffer();
         console.timeEnd('[SWF] File->ArrayBuffer');
     }
 
     console.log('[SWF] Raw size bytes:', arrayBuffer.byteLength);
-    // MISSING: Buffer size validation - could exhaust memory
+    
+    // SECURITY: Minimum size check is good but arbitrary
+    if (arrayBuffer.byteLength < 8) {
+        throw new Error('File too small to be a valid SWF (minimum 8 bytes)');
+    }
+    
     const dataView = new DataView(arrayBuffer);
-
-    // MISSING: Buffer length check before reading header
+    // PERFORMANCE: String.fromCharCode creates new strings each time
+    // TYPE SAFETY: No validation that getUint8 won't throw
     const signature = String.fromCharCode(
         dataView.getUint8(0),
         dataView.getUint8(1),
@@ -41,128 +82,200 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
 
     console.log('[SWF] Header:', { signature, compressed, version, declaredLength: fileLength });
 
-    // MISSING: Support for ZWS (LZMA compressed) format
-    if (signature !== 'FWS' && signature !== 'CWS') {
-        throw new Error('Arquivo não é um SWF válido');
+    // ISSUE: ZWS signature is checked but not supported
+    // MISSING: More detailed signature validation
+    if (signature !== 'FWS' && signature !== 'CWS' && signature !== 'ZWS') {
+        throw new Error('Invalid SWF file signature');
     }
 
-    // MISSING: Version validation - very old/new versions may not be supported
-    // MISSING: File length validation against actual buffer size
+    // ISSUE: Version range is arbitrary and may be outdated
+    // MISSING: Version-specific feature support checking
+    if (version < 1 || version > 40) {
+        console.warn('Unusual SWF version:', version);
+    }
+
+    // ISSUE: File length validation only warns, doesn't fail
+    // MISSING: Proper handling of length mismatches
+    if (fileLength !== arrayBuffer.byteLength && !compressed) {
+        console.warn('File length mismatch:', { declared: fileLength, actual: arrayBuffer.byteLength });
+    }
 
     let decompressedData: DataView;
 
-    if (compressed) {
+    if (compressed || signature === 'ZWS') {
+        // MISSING: ZWS (LZMA) support claimed but not implemented
+        if (signature === 'ZWS') {
+            throw new Error('LZMA compressed SWF (ZWS) not yet supported');
+        }
+        
         console.time('[SWF] Decompress');
-        // BUG: No validation that buffer has enough data for 8-byte header
+        // ISSUE: Redundant check - already validated above
+        if (arrayBuffer.byteLength <= 8) {
+            throw new Error('Compressed SWF too small to contain payload');
+        }
+        
+        // PERFORMANCE: Creates new Uint8Array view instead of using existing dataView
         const compressedData = new Uint8Array(arrayBuffer, 8);
         console.log('[SWF] Compressed payload length (excluding 8-byte header):', compressedData.length);
+        
         try {
             const decompressed = await decompressZlib(compressedData);
             console.timeEnd('[SWF] Decompress');
             console.log('[SWF] Decompressed length:', decompressed.length);
-            // BUG: This check is incorrect - should compare with declared file length
-            if (decompressed.length === compressedData.length) {
-                console.warn('[SWF] Decompressed size equals compressed size - possibly failed decompression');
+            
+            // ISSUE: Empty decompression result should be more specific error
+            if (decompressed.length === 0) {
+                throw new Error('Decompression resulted in empty data');
             }
-            // MEMORY ISSUE: Creating large buffers without cleanup on error
+            
+            // ISSUE: Arbitrary threshold of 1000 bytes difference
+            // MISSING: Proper validation of decompressed size
+            const expectedDecompressedSize = fileLength - 8;
+            if (Math.abs(decompressed.length - expectedDecompressedSize) > 1000) {
+                console.warn('Decompressed size differs significantly from expected:', {
+                    decompressed: decompressed.length,
+                    expected: expectedDecompressedSize
+                });
+            }
+            
+            // PERFORMANCE: Multiple buffer copies instead of single allocation
+            // Memory allocations could be optimized
             const fullBuffer = new ArrayBuffer(8 + decompressed.length);
-            const fullView = new DataView(fullBuffer);
-            // PERFORMANCE: Byte-by-byte copy is inefficient
-            for (let i = 0; i < 8; i++) fullView.setUint8(i, dataView.getUint8(i));
-            fullView.setUint8(0, 0x46); // 'F'
-            new Uint8Array(fullBuffer).set(decompressed, 8);
+            const headerView = new Uint8Array(fullBuffer, 0, 8);
+            const payloadView = new Uint8Array(fullBuffer, 8);
+            
+            // Copy header (convert CWS to FWS)
+            headerView.set(new Uint8Array(arrayBuffer, 0, 8));
+            headerView[0] = 0x46; // 'F'
+            
+            // Copy decompressed payload
+            payloadView.set(decompressed);
+            
             decompressedData = new DataView(fullBuffer);
         } catch (err) {
             console.timeEnd('[SWF] Decompress');
-            console.error('[SWF] Decompress failed, aborting with raw data (likely to fail later):', err);
-            // BUG: Using compressed data when decompression fails will cause parsing errors
-            decompressedData = dataView;
+            console.error('[SWF] Decompression failed:', err);
+            // TYPE SAFETY: Error message construction could be improved
+            throw new Error(`Failed to decompress SWF: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
     } else {
         decompressedData = dataView;
     }
 
+    // TYPE SAFETY: SWFFileHeader interface might be incomplete
     const header: SWFFileHeader = { signature, version, fileLength, compressed };
     console.timeEnd('[SWF] Total load');
     return { header, dataView: decompressedData };
 }
 
+// PERFORMANCE: Hardcoded timeout value
+// MISSING: Configuration options for timeout
+const DECOMPRESS_TIMEOUT_MS = 10000; // 10 seconds
+
+// MISSING: Proper error types for different failure modes
+// TYPE SAFETY: Return type should be more specific
 async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
     console.log('[SWF] Compressed bytes:', compressedData.length, 'First bytes:', [...compressedData.slice(0, 6)]);
 
-    // 1. Try pako first (most reliable & synchronous)
+    // ISSUE: Pako fallback strategy is flawed - should be primary method
+    // PERFORMANCE: Multiple decompression attempts waste CPU
     try {
         console.time('[SWF] pako.inflate');
         const out = pako.inflate(compressedData);
         console.timeEnd('[SWF] pako.inflate');
         return out;
     } catch (e) {
-        console.warn('[SWF] pako inflate falhou, tentando alternativas:', e);
+        console.warn('[SWF] pako inflate failed, trying alternatives:', e);
     }
 
-    // 2. Try native DecompressionStream with timeout safeguard
-    // BROWSER COMPATIBILITY: DecompressionStream not available in all browsers
+    // TYPE SAFETY: DecompressionStream availability check is runtime only
+    // MISSING: Feature detection for other browsers
     if (typeof DecompressionStream !== 'undefined') {
         try {
             console.time('[SWF] DecompressionStream');
-            // MAGIC NUMBER: 8000ms timeout is arbitrary
-            const result = await decompressWithStream(compressedData, 8000);
+            const result = await decompressWithStream(compressedData, DECOMPRESS_TIMEOUT_MS);
             console.timeEnd('[SWF] DecompressionStream');
             return result;
         } catch (e) {
-            console.warn('[SWF] DecompressionStream falhou:', e);
+            console.warn('[SWF] DecompressionStream failed:', e);
         }
     }
 
-    // 3. Fallback very naive
-    // BAD PRACTICE: "Less reliable" fallback should not be used in production
-    console.warn('[SWF] Usando fallback inflate simples (menos confiável)');
-    return inflateSimple(compressedData);
+    // ISSUE: Should provide more specific error about what methods were tried
+    throw new Error('All decompression methods failed');
 }
 
+// MISSING: Input validation and error handling
+// PERFORMANCE: Chunk size is hardcoded
 async function decompressWithStream(data: Uint8Array, timeoutMs: number): Promise<Uint8Array> {
-    return new Promise<Uint8Array>(async (resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error('Timeout na descompressão nativa')), timeoutMs);
-        try {
-            const stream = new DecompressionStream('deflate');
-            const writer = stream.writable.getWriter();
-            // Ensure we provide an ArrayBuffer (not potentially SharedArrayBuffer / ArrayBufferLike)
-            const buffer = new ArrayBuffer(data.byteLength);
-            new Uint8Array(buffer).set(data);
-            await writer.write(buffer); // BufferSource acceptable
-            await writer.close();
-            const reader = stream.readable.getReader();
-            const chunks: Uint8Array[] = [];
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                if (value) chunks.push(value);
+    // PERFORMANCE: Hardcoded chunk size without justification
+    const CHUNK_SIZE = 64 * 1024; // 64KB chunks for memory efficiency
+    
+    // SECURITY: Good memory safety check
+    // ISSUE: Arbitrary 100MB limit
+    if (data.length > 100 * 1024 * 1024) { // 100MB limit
+        throw new Error(`Input data too large: ${data.length} bytes`);
+    }
+
+    // PERFORMANCE: AbortController for timeout is good practice
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => {
+        abortController.abort();
+    }, timeoutMs);
+
+    try {
+        // TYPE SAFETY: DecompressionStream constructor could throw
+        const stream = new DecompressionStream('deflate');
+        const writer = stream.writable.getWriter();
+        
+        // PERFORMANCE: Unnecessary buffer copy for SharedArrayBuffer safety
+        // ISSUE: Comment mentions SharedArrayBuffer but doesn't properly detect it
+        const buffer = new ArrayBuffer(data.byteLength);
+        new Uint8Array(buffer).set(data);
+        
+        await writer.write(buffer);
+        await writer.close();
+        
+        const reader = stream.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        let totalLength = 0;
+        
+        // PERFORMANCE: Synchronous abort check in async loop
+        // ISSUE: No backpressure handling for large streams
+        while (true) {
+            if (abortController.signal.aborted) {
+                throw new Error(`Decompression timeout after ${timeoutMs}ms`);
             }
-            const total = chunks.reduce((s, c) => s + c.length, 0);
-            const out = new Uint8Array(total);
-            let off = 0; for (const c of chunks) { out.set(c, off); off += c.length; }
-            clearTimeout(timer);
-            resolve(out);
-        } catch (err) {
-            clearTimeout(timer);
-            reject(err);
+
+            const { value, done } = await reader.read();
+            if (done) break;
+            
+            if (value) {
+                chunks.push(value);
+                totalLength += value.length;
+
+                // SECURITY: Good additional memory check
+                // ISSUE: 500MB limit is arbitrary
+                if (totalLength > 500 * 1024 * 1024) { // 500MB decompressed limit
+                    throw new Error(`Decompressed data too large: ${totalLength} bytes`);
+                }
+            }
         }
-    });
+        
+        // PERFORMANCE: Efficient concatenation approach
+        // Could be optimized further with single allocation
+        const out = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const chunk of chunks) {
+            out.set(chunk, offset);
+            offset += chunk.length;
+        }
+        
+        return out;
+    } finally {
+        // ISSUE: clearTimeout should be called even on success
+        clearTimeout(timeoutId);
+    }
 }
 
-function inflateSimple(data: Uint8Array): Uint8Array {
-    console.warn('[SWF] inflateSimple chamado — resultado pode ser inválido');
-    let startOffset = 0; let endOffset = data.length;
-    if (data.length >= 2) {
-        const header = (data[0] << 8) | data[1];
-        if ((header & 0x0F00) === 0x0800 && (header % 31) === 0) {
-            startOffset = 2; endOffset = data.length - 4;
-        }
-    }
-    const result = data.slice(startOffset, endOffset);
-    if (result.length < data.length * 0.1) {
-        console.warn('[SWF] Resultado suspeito (muito pequeno), retornando dados originais');
-        return data;
-    }
-    return result;
-}
+

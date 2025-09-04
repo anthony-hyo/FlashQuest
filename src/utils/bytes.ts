@@ -30,86 +30,92 @@ export interface ColorTransform {
 export class Bytes {
     private view: DataView;
     private bitBuffer: number = 0;
-    private bitPosition: number = 8; // BUG: Should be 0 initially, 8 means we start with no bits available
-    position: number = 0; // TYPE SAFETY: Should be private with getter/setter for validation
+    public bitPosition: number = 0; // ISSUE: Made public for debugging, should be encapsulated with getter/setter
+    private _position: number = 0;
 
     constructor(buffer: ArrayBuffer | ArrayBufferLike) {
-        // UNNECESSARY COMPLEXITY: SharedArrayBuffer handling adds complexity for little benefit
-        // Safely check for SharedArrayBuffer without causing ReferenceError
-        const hasSharedArrayBuffer = typeof window !== 'undefined' && 'SharedArrayBuffer' in window;
-        if (hasSharedArrayBuffer && buffer instanceof window.SharedArrayBuffer) {
-            // Convert SharedArrayBuffer to ArrayBuffer for compatibility
-            const temp = new ArrayBuffer(buffer.byteLength);
-            new Uint8Array(temp).set(new Uint8Array(buffer));
-            this.view = new DataView(temp);
-        } else {
-            // Handle regular ArrayBuffer or when SharedArrayBuffer is not available
-            this.view = new DataView(buffer as ArrayBuffer);
+        if (!buffer) {
+            throw new ParserError('Buffer cannot be null or undefined', 0);
         }
-        // MISSING: Input validation - buffer could be null or zero-length
+        
+        // ISSUE: Type safety - ArrayBufferLike cast could hide issues with SharedArrayBuffer
+        // Allow empty buffers for zero-length tags
+        this.view = new DataView(buffer as ArrayBuffer);
+    }
+
+    get position(): number {
+        return this._position;
+    }
+
+    set position(value: number) {
+        if (value < 0 || value > this.view.byteLength) {
+            throw new ParserError(`Invalid position: ${value}. Must be between 0 and ${this.view.byteLength}`, 0);
+        }
+        this._position = value;
+        this.bitPosition = 0; // Reset bit position when seeking
     }
 
     get remaining(): number {
-        return this.view.byteLength - this.position;
+        return this.view.byteLength - this._position;
     }
 
     get eof(): boolean {
-        return this.position >= this.view.byteLength;
+        return this._position >= this.view.byteLength;
     }
 
     skip(bytes: number): void {
-        this.position += bytes;
+        if (bytes < 0) {
+            throw new ParserError('Cannot skip negative bytes', 0);
+        }
+        // ISSUE: No bounds checking - could skip beyond buffer end
+        this._position += bytes;
     }
 
     readUint8(): number {
-        this.bitPosition = 8; // Reset bit position when reading bytes
-        // MISSING: More descriptive error message with position info
-        if (this.position >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0; // Reset bit position when reading bytes
+        if (this._position >= this.view.byteLength) {
+            throw new ParserError(`Unexpected end of data at position ${this._position}`, 0);
         }
-        return this.view.getUint8(this.position++);
+        return this.view.getUint8(this._position++);
     }
 
     readUint16(): number {
-        this.bitPosition = 8;
-        // BUG: Off-by-one error - should check position + 1 < byteLength, not >=
-        if (this.position + 1 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 2 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Uint16 at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getUint16(this.position, true); // ENDIANNESS: Always little-endian, should be configurable
-        this.position += 2;
+        const value = this.view.getUint16(this._position, true);
+        this._position += 2;
         return value;
     }
 
     readInt16(): number {
-        this.bitPosition = 8;
-        // BUG: Same off-by-one error as readUint16
-        if (this.position + 1 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 2 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Int16 at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getInt16(this.position, true);
-        this.position += 2;
+        const value = this.view.getInt16(this._position, true);
+        this._position += 2;
         return value;
     }
 
     readUint32(): number {
-        this.bitPosition = 8;
-        // BUG: Same off-by-one error - should check position + 3 < byteLength
-        if (this.position + 3 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 4 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Uint32 at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getUint32(this.position, true);
-        this.position += 4;
+        const value = this.view.getUint32(this._position, true);
+        this._position += 4;
         return value;
     }
 
     readInt32(): number {
-        this.bitPosition = 8;
-        if (this.position + 3 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 4 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Int32 at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getInt32(this.position, true);
-        this.position += 4;
+        const value = this.view.getInt32(this._position, true);
+        this._position += 4;
         return value;
     }
 
@@ -122,75 +128,103 @@ export class Bytes {
     }
 
     readFloat(): number {
-        this.bitPosition = 8;
-        if (this.position + 3 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 4 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Float at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getFloat32(this.position, true);
-        this.position += 4;
+        const value = this.view.getFloat32(this._position, true);
+        this._position += 4;
         return value;
     }
 
     readDouble(): number {
-        this.bitPosition = 8;
-        if (this.position + 7 >= this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        this.bitPosition = 0;
+        if (this._position + 8 > this.view.byteLength) {
+            throw new ParserError(`Cannot read Double at position ${this._position}, not enough bytes`, 0);
         }
-        const value = this.view.getFloat64(this.position, true);
-        this.position += 8;
+        const value = this.view.getFloat64(this._position, true);
+        this._position += 8;
         return value;
     }
 
     readEncodedU32(): number {
+        // PERFORMANCE: This method could be optimized by reading larger chunks
+        // TYPE SAFETY: Should validate that result stays within U32 bounds
         let result = 0;
+        let shift = 0;
         for (let i = 0; i < 5; i++) {
             const byte = this.readUint8();
-            result |= (byte & 0x7F) << (7 * i);
+            result |= (byte & 0x7F) << shift;
+            shift += 7;
             if (!(byte & 0x80)) break;
+            if (shift >= 32) {
+                throw new ParserError('EncodedU32 overflow', 0);
+            }
         }
-        return result;
+        return result >>> 0; // Ensure unsigned 32-bit
     }
 
     readString(): string {
+        const startPosition = this._position;
         let result = '';
-        while (true) {
-            if (this.position >= this.view.byteLength) {
-                throw new Error('Unexpected end of data');
-            }
+        
+        // PERFORMANCE: String concatenation in loop is inefficient, should use array + join
+        // SECURITY: No encoding validation - assumes ASCII/UTF-8
+        while (this._position < this.view.byteLength) {
             const byte = this.readUint8();
             if (byte === 0) break;
             result += String.fromCharCode(byte);
+            
+            // Prevent infinite loops with a reasonable limit
+            if (result.length > 65536) {
+                throw new ParserError(`String too long (>65536 chars) starting at position ${startPosition}`, 0);
+            }
         }
+        
+        if (this._position >= this.view.byteLength && result.length > 0) {
+            throw new ParserError(`Unterminated string starting at position ${startPosition}`, 0);
+        }
+        
         return result;
     }
 
     readBytes(length: number): Bytes {
-        if (this.position + length > this.view.byteLength) {
-            throw new Error('Unexpected end of data');
+        if (length < 0) {
+            throw new ParserError('Cannot read negative length', 0);
         }
-        const bytes = new Bytes(this.view.buffer.slice(this.position, this.position + length));
-        this.position += length;
+        if (this._position + length > this.view.byteLength) {
+            throw new ParserError(`Cannot read ${length} bytes at position ${this._position}, not enough data`, 0);
+        }
+        // PERFORMANCE: Buffer slicing creates new ArrayBuffer copy - expensive for large data
+        const bytes = new Bytes(this.view.buffer.slice(this._position, this._position + length));
+        this._position += length;
         return bytes;
     }
 
     readBit(): number {
-        if (this.bitPosition === 8) {
-            if (this.position >= this.view.byteLength) {
-                // Return 0 instead of throwing error to handle gracefully
-                return 0;
+        if (this.bitPosition === 0) {
+            if (this._position >= this.view.byteLength) {
+                throw new ParserError(`Cannot read bit at position ${this._position}, end of data`, 0);
             }
             this.bitBuffer = this.readUint8();
-            this.bitPosition = 0;
+            this.bitPosition = 8;
         }
-        return (this.bitBuffer >> (7 - this.bitPosition++)) & 1;
+        // ISSUE: Bit ordering might be incorrect for SWF format (MSB vs LSB first)
+        return (this.bitBuffer >> (this.bitPosition-- - 1)) & 1;
     }
 
     readUBits(bits: number): number {
+        if (bits < 0 || bits > 32) {
+            throw new ParserError(`Invalid bit count: ${bits}. Must be between 0 and 32`, 0);
+        }
+        if (bits === 0) return 0;
+        
+        // PERFORMANCE: Could be optimized by reading multiple bytes at once
         let result = 0;
         for (let i = 0; i < bits; i++) {
             result = (result << 1) | this.readBit();
         }
-        return result;
+        return result >>> 0; // Ensure unsigned
     }
 
     readSBits(bits: number): number {
@@ -276,6 +310,9 @@ export class Bytes {
     }
 
     align(): void {
-        this.bitPosition = 8;
+        if (this.bitPosition > 0) {
+            this._position++; // Advance to next byte if we're in the middle of one
+            this.bitPosition = 0;
+        }
     }
 }

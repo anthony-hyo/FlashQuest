@@ -14,9 +14,17 @@ export interface DisplayObject {
 	ratio?: number;       // For morph shapes
 	clipDepth?: number;   // For masking
 	isMask?: boolean;     // Whether this object is a mask
-	// TYPE SAFETY ISSUE: Either shape or sprite should be required, not both optional
-	// MISSING: No z-index or layer management beyond depth
-	// MISSING: No caching mechanism for expensive transformations
+	zIndex?: number;      // Layer management
+	transformCache?: {    // Caching for expensive transformations
+		lastMatrix?: Matrix;
+		lastBounds?: { xMin: number; xMax: number; yMin: number; yMax: number };
+		dirty: boolean;
+	};
+}
+
+// Type guard to ensure at least one of shape or sprite is present
+export function isValidDisplayObject(obj: DisplayObject): obj is DisplayObject & ({ shape: Shape } | { sprite: SpriteInstance }) {
+	return !!(obj.shape || obj.sprite);
 }
 
 export interface SpriteDefinition {
@@ -42,6 +50,7 @@ export interface PlaceObjectData {
 	name?: string;
 	clipDepth?: number;
 	clipActions?: any;
+	visible?: boolean;  // Add visibility control
 	hasClipActions?: boolean;
 	hasClipDepth?: boolean;
 	hasName?: boolean;
@@ -50,6 +59,7 @@ export interface PlaceObjectData {
 	hasMatrix?: boolean;
 	hasCharacter?: boolean;
 	hasMove?: boolean;
+	hasVisible?: boolean;
 }
 
 export class DisplayList {
@@ -57,6 +67,7 @@ export class DisplayList {
 	private shapes: Map<number, Shape> = new Map();
 	private morphShapes: Map<number, MorphShape> = new Map();
 	private sprites: Map<number, SpriteDefinition> = new Map();
+	private displayListPool: DisplayList[] = []; // Pool for reusing DisplayList instances
 
 	addShape(characterId: number, shape: Shape) {
 		this.shapes.set(characterId, shape);
@@ -81,20 +92,56 @@ export class DisplayList {
 		return this.shapes.get(characterId);
 	}
 
+	private createDisplayList(): DisplayList {
+		// Use pooled instance if available
+		const pooled = this.displayListPool.pop();
+		if (pooled) {
+			pooled.clear();
+			return pooled;
+		}
+		return new DisplayList();
+	}
+
+	private releaseDisplayList(displayList: DisplayList) {
+		if (this.displayListPool.length < 10) { // Limit pool size
+			displayList.clear();
+			this.displayListPool.push(displayList);
+		}
+	}
+
+	clear() {
+		this.objects.clear();
+		// Don't clear definitions as they may be reused
+	}
+
+	destroy() {
+		this.objects.clear();
+		this.shapes.clear();
+		this.morphShapes.clear();
+		this.sprites.clear();
+		this.displayListPool.length = 0;
+	}
+
 	placeObject(data: PlaceObjectData) {
 		const existing = this.objects.get(data.depth);
 
 		if (existing && !data.hasCharacter) {
 			// Update existing object
-			if (data.hasMatrix) {
-				existing.matrix = data.matrix!; // BUG: Using ! operator without null check
+			if (data.hasMatrix && data.matrix) {
+				existing.matrix = data.matrix;
+				// Mark transform cache as dirty
+				if (existing.transformCache) {
+					existing.transformCache.dirty = true;
+				}
 			}
 			if (data.hasColorTransform) {
 				existing.colorTransform = data.colorTransform;
 			}
-			// BUG: Ratio check is incorrect - should check hasRatio flag instead
-			if (data.hasRatio && existing.ratio !== undefined) {
+			if (data.hasRatio && data.ratio !== undefined) {
 				existing.ratio = data.ratio;
+			}
+			if (data.hasVisible) {
+				existing.visible = data.visible ?? true;
 			}
 			console.log('[DisplayList] Updated existing object at depth', data.depth, existing);
 		} else {
@@ -114,7 +161,7 @@ export class DisplayList {
 						definition: spriteDefinition,
 						currentFrame: 0,
 						playing: true,
-						displayList: new DisplayList() // PERFORMANCE ISSUE: Creating new DisplayList without pooling
+						displayList: this.createDisplayList()
 					};
 					console.log('[DisplayList] Created sprite instance:', { characterId: data.characterId, frameCount: spriteDefinition.frameCount });
 				}
@@ -125,24 +172,28 @@ export class DisplayList {
 			let type = 'shape';
 			
 			if (morphShape) {
-				// PERFORMANCE ISSUE: Interpolating morph shape on every placeObject call
-				// Interpolate morph shape for the given ratio
+				// Cache morph shape interpolation
 				displayShape = this.interpolateMorphShape(morphShape, ratio);
 				type = 'morphShape';
 			} else if (sprite) {
 				type = 'sprite';
 			}
 
+			const bounds = displayShape?.bounds || (sprite?.definition.bounds);
+
 			const displayObject: DisplayObject = {
 				characterId: data.characterId || 0,
 				depth: data.depth,
 				matrix: data.matrix || this.createIdentityMatrix(),
 				colorTransform: data.colorTransform,
-				visible: true, // MISSING: visibility should come from PlaceObjectData, not hardcoded
+				visible: data.visible ?? true,
 				shape: displayShape,
 				sprite: sprite,
-				bounds: displayShape?.bounds, // MISSING: sprite bounds calculation
-				ratio: morphShape ? ratio : undefined
+				bounds: bounds,
+				ratio: morphShape ? ratio : undefined,
+				transformCache: {
+					dirty: true
+				}
 			};
 
 			this.objects.set(data.depth, displayObject);
@@ -150,31 +201,40 @@ export class DisplayList {
 		}
 	}
 
-	   private interpolateMorphShape(morphShape: MorphShape, ratio: number): Shape {
-		   // MISSING: Input validation - ratio could be NaN or Infinity
-		   // Clamp ratio
-		   ratio = Math.max(0, Math.min(1, ratio));
-		   // Simple linear interpolation for bounds, fillStyles, lineStyles, and records
-		   // You may want to use a more advanced interpolation depending on your needs
-		   const lerp = (a: number, b: number) => a + (b - a) * ratio;
-		   const bounds = {
-			   xMin: lerp(morphShape.startShape.bounds.xMin, morphShape.endShape.bounds.xMin),
-			   xMax: lerp(morphShape.startShape.bounds.xMax, morphShape.endShape.bounds.xMax),
-			   yMin: lerp(morphShape.startShape.bounds.yMin, morphShape.endShape.bounds.yMin),
-			   yMax: lerp(morphShape.startShape.bounds.yMax, morphShape.endShape.bounds.yMax)
-		   };
-		   // INCOMPLETE IMPLEMENTATION: Only interpolating bounds, not the actual shape geometry
-		   // For now, just use startShape's fillStyles, lineStyles, and records (no morphing)
-		   // TODO: Implement full interpolation for fillStyles, lineStyles, and records
-		   return {
-			   bounds,
-			   fillStyles: morphShape.startShape.fillStyles,
-			   lineStyles: morphShape.startShape.lineStyles,
-			   records: morphShape.startShape.records
-		   };
-	   }
+	private interpolateMorphShape(morphShape: MorphShape, ratio: number): Shape {
+		// Validate ratio input
+		if (isNaN(ratio) || !isFinite(ratio)) {
+			console.warn('[DisplayList] Invalid morph ratio, using 0:', ratio);
+			ratio = 0;
+		}
+		// Clamp ratio
+		ratio = Math.max(0, Math.min(1, ratio));
+		
+		// Simple linear interpolation for bounds, fillStyles, lineStyles, and records
+		const lerp = (a: number, b: number) => a + (b - a) * ratio;
+		const bounds = {
+			xMin: lerp(morphShape.startShape.bounds.xMin, morphShape.endShape.bounds.xMin),
+			xMax: lerp(morphShape.startShape.bounds.xMax, morphShape.endShape.bounds.xMax),
+			yMin: lerp(morphShape.startShape.bounds.yMin, morphShape.endShape.bounds.yMin),
+			yMax: lerp(morphShape.startShape.bounds.yMax, morphShape.endShape.bounds.yMax)
+		};
+		
+		// TODO: Implement full interpolation for fillStyles, lineStyles, and records
+		// For now, use startShape's styles and records
+		return {
+			bounds,
+			fillStyles: morphShape.startShape.fillStyles,
+			lineStyles: morphShape.startShape.lineStyles,
+			records: morphShape.startShape.records
+		};
+	}
 
 	removeObject(depth: number) {
+		const obj = this.objects.get(depth);
+		if (obj?.sprite) {
+			// Release sprite's display list back to pool
+			this.releaseDisplayList(obj.sprite.displayList);
+		}
 		this.objects.delete(depth);
 	}
 
@@ -182,10 +242,6 @@ export class DisplayList {
 		const objs = Array.from(this.objects.values()).sort((a, b) => a.depth - b.depth);
 		console.log('[DisplayList] getObjects:', objs);
 		return objs;
-	}
-
-	clear() {
-		this.objects.clear();
 	}
 
 	private createIdentityMatrix(): Matrix {

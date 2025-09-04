@@ -71,6 +71,9 @@ export interface SwfTag {
 }
 
 export interface SwfHeader {
+	signature: string;
+	version: number;
+	fileLength: number;
 	frameSize: {
 		xMin: number;
 		xMax: number;

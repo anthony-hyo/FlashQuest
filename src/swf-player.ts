@@ -13,37 +13,54 @@ import { MorphShapeHandler } from './tags/handlers/morph-shape-handler';
 import { ActionScriptHandler } from './tags/handlers/action-script-handler';
 import { TagData } from './tags/tag-handler';
 
+interface InteractiveObject {
+    id: number;
+    shape: any; // TYPE SAFETY: Should be properly typed Shape interface
+    matrix?: any; // TYPE SAFETY: Should be Matrix interface
+    handleMouseDown?: () => void;
+    handleMouseUp?: () => void;
+    handleMouseOver?: () => void;
+    handleMouseOut?: () => void;
+    isOver?: boolean;
+}
+
 export class SWFPlayer {
     private canvas: HTMLCanvasElement;
     private renderer: WebGLRenderer;
     private timeline: Timeline = new Timeline();
     private isPlaying: boolean = false;
-    private frameRate: number = 12; // HARDCODED: Should read from SWF header
+    private frameRate: number = 12; // PERFORMANCE: Default 12fps might be too low for smooth animations
     private animationId: number | null = null;
-    private lastFrameTime: number = 0; // PERFORMANCE: No frame rate limiting or smoothing
+    private lastFrameTime: number = 0;
     private tagHandlers: TagHandlerRegistry = new TagHandlerRegistry();
-    private resourceCache: Map<number, any> = new Map(); // TYPE SAFETY: 'any' type loses type information
-    private interactiveObjects: Map<number, any> = new Map(); // TYPE SAFETY: 'any' type loses type information
-    // MEMORY LEAK: These caches are never cleaned up
+    private resourceCache: Map<number, any> = new Map(); // TYPE SAFETY: any should be specific resource types
+    private interactiveObjects: Map<number, InteractiveObject> = new Map();
     private soundHandler: SoundHandler;
     private spriteHandler: SpriteHandler;
     private actionScriptHandler: ActionScriptHandler;
     private shapeHandler: ShapeTagHandler;
-    // MISSING: No error state management
-    // MISSING: No loading progress tracking
-    // MISSING: No pause/resume state persistence
+    private buttonHandler: ButtonHandler;
+    private filterHandler: FilterHandler;
+    private morphShapeHandler: MorphShapeHandler;
+    private eventListeners: Array<{ element: HTMLElement; event: string; listener: EventListener }> = [];
+    private isDestroyed: boolean = false;
+    private loadingProgress: number = 0; // MISSING: Progress tracking implementation incomplete
 
     constructor(canvas: HTMLCanvasElement) {
-        // MISSING: Input validation - canvas could be null
+        if (!canvas) {
+            throw new Error('Canvas element is required');
+        }
         this.canvas = canvas;
-        this.renderer = new WebGLRenderer(canvas, 2048); // HARDCODED: Batch size should be configurable
+        this.renderer = new WebGLRenderer(canvas, 2048);
         this.soundHandler = new SoundHandler();
         this.spriteHandler = new SpriteHandler();
         this.actionScriptHandler = new ActionScriptHandler();
         this.shapeHandler = new ShapeTagHandler();
+        this.buttonHandler = new ButtonHandler();
+        this.filterHandler = new FilterHandler();
+        this.morphShapeHandler = new MorphShapeHandler();
         this.initTagHandlers();
         this.setupInteractivity();
-        // MISSING: No cleanup registration for proper disposal
     }
 
     private initTagHandlers() {
@@ -58,11 +75,10 @@ export class SWFPlayer {
         ], this.shapeHandler);
 
         // Register button handler
-        // BUG: Creating new ButtonHandler() instead of reusing instance leads to memory waste
         this.tagHandlers.register([
             SwfTagCode.DefineButton,
             SwfTagCode.DefineButton2
-        ], new ButtonHandler());
+        ], this.buttonHandler);
 
         // Register sound handler
         this.tagHandlers.register([
@@ -72,153 +88,183 @@ export class SWFPlayer {
             SwfTagCode.SoundStreamBlock
         ], this.soundHandler);
 
-        // Register sprite handler
-        // BUG: PlaceObject tags registered to sprite handler but also used by other handlers - overlap conflict
+        // Register sprite handler for sprite-specific tags
         this.tagHandlers.register([
-            SwfTagCode.DefineSprite,
+            SwfTagCode.DefineSprite
+        ], this.spriteHandler);
+
+        // MISSING: Many important SWF tag handlers not registered:
+        // - DefineText, DefineEditText for text objects
+        // - DefineBitmap for image assets  
+        // - DefineVideo for video content
+        // - DoAction for ActionScript code
+        // - FrameLabel for timeline navigation
+        // Register place object handlers to sprite handler (primary)
+        this.tagHandlers.register([
             SwfTagCode.PlaceObject,
             SwfTagCode.PlaceObject2,
             SwfTagCode.PlaceObject3
         ], this.spriteHandler);
 
-        // Register filter handler
-        // BUG: PlaceObject2/3 registered to both sprite and filter handlers - which one wins?
-        this.tagHandlers.register([
-            SwfTagCode.PlaceObject2,
-            SwfTagCode.PlaceObject3
-        ], new FilterHandler());
-
         // Register morph shape handler
-        // BUG: Creating new instance instead of reusing
         this.tagHandlers.register([
             SwfTagCode.DefineMorphShape,
             SwfTagCode.DefineMorphShape2
-        ], new MorphShapeHandler());
+        ], this.morphShapeHandler);
 
         // Register ActionScript handler
         this.tagHandlers.register([
             SwfTagCode.DoAction,
             SwfTagCode.DoInitAction
         ], this.actionScriptHandler);
-        // MISSING: Many SWF tag types not handled (DefineText, DefineBitmap, etc.)
     }
 
     private setupInteractivity() {
-        // Set up event listeners for button interactions
-        // MEMORY LEAK: Event listeners never removed - should store references for cleanup
-        // MISSING: Touch events for mobile support
-        // MISSING: Keyboard events for accessibility
-        this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
-        this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
-        this.canvas.addEventListener('mousemove', this.handleMouseMove.bind(this));
-        // MISSING: Context menu handling
-        // MISSING: Focus/blur events for proper state management
+        const mouseDownListener = (event: Event) => this.handleMouseDown(event as MouseEvent);
+        const mouseUpListener = (event: Event) => this.handleMouseUp(event as MouseEvent);
+        const mouseMoveListener = (event: Event) => this.handleMouseMove(event as MouseEvent);
+
+        this.canvas.addEventListener('mousedown', mouseDownListener);
+        this.canvas.addEventListener('mouseup', mouseUpListener);
+        this.canvas.addEventListener('mousemove', mouseMoveListener);
+
+        // MISSING: Touch event support for mobile devices
+        // MISSING: Keyboard event support for interactive elements
+        // MISSING: Context menu prevention for right-click
+        
+        // Store references for cleanup
+        this.eventListeners.push(
+            { element: this.canvas, event: 'mousedown', listener: mouseDownListener },
+            { element: this.canvas, event: 'mouseup', listener: mouseUpListener },
+            { element: this.canvas, event: 'mousemove', listener: mouseMoveListener }
+        );
+    }
+
+    private handleMouseEvent(event: MouseEvent, eventType: 'down' | 'up' | 'move') {
+        if (this.isDestroyed) return;
+        
+        const pos = this.getCanvasPosition(event);
+        
+        // PERFORMANCE: Iterating through all interactive objects on every mouse event - could be optimized with spatial indexing
+        for (const [id, obj] of this.interactiveObjects) {
+            const isHit = this.hitTest(pos, obj);
+            
+            switch (eventType) {
+                case 'down':
+                    if (isHit) obj.handleMouseDown?.();
+                    break;
+                case 'up':
+                    if (isHit) obj.handleMouseUp?.();
+                    break;
+                case 'move':
+                    if (isHit && !obj.isOver) {
+                        obj.handleMouseOver?.();
+                        obj.isOver = true;
+                    } else if (!isHit && obj.isOver) {
+                        obj.handleMouseOut?.();
+                        obj.isOver = false;
+                    }
+                    break;
+            }
+        }
     }
 
     private handleMouseDown(event: MouseEvent) {
-        // PERFORMANCE: Linear search through all interactive objects on every mouse event
-        // MISSING: Event bubbling/capturing system like Flash had
-        const pos = this.getCanvasPosition(event);
-        for (const [id, obj] of this.interactiveObjects) {
-            if (this.hitTest(pos, obj)) {
-                // TYPE SAFETY: Optional chaining on untyped 'any' object
-                obj.handleMouseDown?.();
-                // MISSING: Event propagation control (stopPropagation, preventDefault)
-            }
-        }
+        this.handleMouseEvent(event, 'down');
     }
 
     private handleMouseUp(event: MouseEvent) {
-        // DUPLICATE CODE: Same pattern as handleMouseDown - should be abstracted
-        const pos = this.getCanvasPosition(event);
-        for (const [id, obj] of this.interactiveObjects) {
-            if (this.hitTest(pos, obj)) {
-                obj.handleMouseUp?.();
-            }
-        }
+        this.handleMouseEvent(event, 'up');
     }
 
     private handleMouseMove(event: MouseEvent) {
-        // PERFORMANCE: Expensive hit testing on every mouse move, should throttle
-        const pos = this.getCanvasPosition(event);
-        for (const [id, obj] of this.interactiveObjects) {
-            const isHit = this.hitTest(pos, obj);
-            if (isHit && !obj.isOver) {
-                obj.handleMouseOver?.();
-                obj.isOver = true;
-            } else if (!isHit && obj.isOver) {
-                obj.handleMouseOut?.();
-                obj.isOver = false;
-            }
-        }
-        // MISSING: Cursor change on hover
+        this.handleMouseEvent(event, 'move');
     }
 
     private getCanvasPosition(event: MouseEvent): { x: number; y: number } {
         const rect = this.canvas.getBoundingClientRect();
-        // BUG: Doesn't account for canvas CSS transforms or page scroll
-        // MISSING: Device pixel ratio handling for high-DPI displays
+        const scaleX = this.canvas.width / rect.width;
+        const scaleY = this.canvas.height / rect.height;
+        
+        // Account for page scroll
+        const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
+        const scrollY = window.pageYOffset || document.documentElement.scrollTop;
+        
         return {
-            x: (event.clientX - rect.left) * (this.canvas.width / rect.width),
-            y: (event.clientY - rect.top) * (this.canvas.height / rect.height)
+            x: (event.clientX - rect.left + scrollX) * scaleX,
+            y: (event.clientY - rect.top + scrollY) * scaleY
         };
     }
 
-    private hitTest(pos: { x: number; y: number }, obj: any): boolean {
-        // INCOMPLETE: Very basic AABB hit testing only
-        // MISSING: Pixel-perfect hit testing for complex shapes
-        // MISSING: Rotation and skew handling in matrix transformations
-        // Implement hit testing using shape bounds and matrices
+    private hitTest(pos: { x: number; y: number }, obj: InteractiveObject): boolean {
+        if (!obj.shape?.bounds) return false;
+        
         const bounds = obj.shape.bounds;
-        const matrix = obj.matrix || { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
+        const matrix = obj.matrix || { scaleX: 1, scaleY: 1, rotateSkew0: 0, rotateSkew1: 0, translateX: 0, translateY: 0 };
         
-        // Transform point to object space
-        // MAGIC NUMBER: /20 hardcoded conversion factor appears multiple times
-        const localX = (pos.x - matrix.translateX / 20) / matrix.scaleX;
-        const localY = (pos.y - matrix.translateY / 20) / matrix.scaleY;
+        // Transform point to object space (inverse transform)
+        const TWIPS_PER_PIXEL = 20;
+        const tx = matrix.translateX / TWIPS_PER_PIXEL;
+        const ty = matrix.translateY / TWIPS_PER_PIXEL;
         
-        return localX >= bounds.xMin / 20 && localX <= bounds.xMax / 20 &&
-               localY >= bounds.yMin / 20 && localY <= bounds.yMax / 20;
+        // Apply inverse translation
+        let localX = pos.x - tx;
+        let localY = pos.y - ty;
+        
+        // Apply inverse scale and rotation (simplified for now)
+        if (matrix.scaleX !== 0) localX /= matrix.scaleX;
+        if (matrix.scaleY !== 0) localY /= matrix.scaleY;
+        
+        // Convert bounds to pixels
+        const boundsMinX = bounds.xMin / TWIPS_PER_PIXEL;
+        const boundsMaxX = bounds.xMax / TWIPS_PER_PIXEL;
+        const boundsMinY = bounds.yMin / TWIPS_PER_PIXEL;
+        const boundsMaxY = bounds.yMax / TWIPS_PER_PIXEL;
+        
+        return localX >= boundsMinX && localX <= boundsMaxX &&
+               localY >= boundsMinY && localY <= boundsMaxY;
     }
 
     async loadSWF(source: string | File): Promise<void> {
         try {
-            // MISSING: Loading progress events for large files
-            // MISSING: Validation of file format before parsing
+            this.loadingProgress = 0;
             const { dataView } = await loadSwf(source);
+            this.loadingProgress = 50;
+            
             const { header, tags } = parseSwf(dataView);
+            this.loadingProgress = 75;
 
             this.frameRate = header.frameRate;
             this.setupCanvas(header.frameSize);
             await this.buildTimeline(tags);
+            this.loadingProgress = 100;
             
-            // LOGIC ERROR: Should validate timeline was built successfully
             if (this.timeline.getTotalFrames() === 0) {
-                console.warn('No frames found in SWF, creating test content');
-                this.createTestContent(); // DEVELOPMENT CODE: Test content in production
+                console.warn('No frames found in SWF');
+                return;
             }
 
             this.timeline.gotoFrame(0);
             this.render();
 
         } catch (error) {
-            // BUG: Error state not tracked - player could be in inconsistent state
+            this.loadingProgress = 0;
             console.error('Failed to load SWF:', error);
             throw error;
         }
     }
 
     private setupCanvas(frameSize: { xMin: number; xMax: number; yMin: number; yMax: number }) {
-        // MAGIC NUMBER: /20 conversion factor should be a named constant
-        const width = Math.abs(frameSize.xMax - frameSize.xMin) / 20;
-        const height = Math.abs(frameSize.yMax - frameSize.yMin) / 20;
+        const TWIPS_PER_PIXEL = 20;
+        const width = Math.abs(frameSize.xMax - frameSize.xMin) / TWIPS_PER_PIXEL;
+        const height = Math.abs(frameSize.yMax - frameSize.yMin) / TWIPS_PER_PIXEL;
         
-        // HARDCODED: Fallback sizes should be configurable
-        // MISSING: Aspect ratio preservation
-        this.canvas.width = Math.min(width, 1200) || 800;
-        this.canvas.height = Math.min(height, 800) || 600;
-        // MISSING: Viewport scaling/fitting options
-        // MISSING: High-DPI display support
+        // Set reasonable defaults if frame size is invalid
+        this.canvas.width = width > 0 ? width : 800;
+        this.canvas.height = height > 0 ? height : 600;
+        
+        // Update renderer viewport
+        this.renderer.setupViewport();
     }
 
     private async buildTimeline(tags: TagData[]) {
@@ -538,6 +584,30 @@ export class SWFPlayer {
 
         console.log('[Render] Rendering batch:', renderBatch.length, 'objects');
         this.renderer.render(renderBatch);
+    }
+
+    public destroy() {
+        if (this.isDestroyed) return;
+        
+        this.isDestroyed = true;
+        this.pause();
+        
+        // Clean up event listeners
+        this.eventListeners.forEach(({ element, event, listener }) => {
+            element.removeEventListener(event, listener);
+        });
+        this.eventListeners = [];
+        
+        // Clear caches
+        this.resourceCache.clear();
+        this.interactiveObjects.clear();
+        
+        // Destroy renderer
+        this.renderer.destroy();
+    }
+
+    public getLoadingProgress(): number {
+        return this.loadingProgress;
     }
 }
 
