@@ -42,7 +42,6 @@ export enum SwfTagCode {
 	DefineVideoStream = 60,
 	VideoFrame = 61,
 	DefineFontInfo2 = 62,
-	DebugID = 63,
 	EnableDebugger2 = 64,
 	ScriptLimits = 65,
 	SetTabIndex = 66,
@@ -55,7 +54,6 @@ export enum SwfTagCode {
 	SymbolClass = 76,
 	Metadata = 77,
 	DefineScalingGrid = 78,
-	DoABC = 82,
 	DefineShape4 = 83,
 	DefineMorphShape2 = 84,
 	DefineSceneAndFrameLabelData = 86,
@@ -65,3 +63,28 @@ export enum SwfTagCode {
 	DefineBitsJPEG4 = 90,
 	DefineFont4 = 91
 }
+
+export interface SwfTag {
+	code: SwfTagCode;
+	length: number;
+	data: import('../utils/bytes').Bytes;
+}
+
+export interface SwfHeader {
+	frameSize: {
+		xMin: number;
+		xMax: number;
+		yMin: number;
+		yMax: number;
+	};
+	frameRate: number;
+	frameCount: number;
+}
+
+export interface SWFFileHeader {
+	signature: string;
+	version: number;
+	fileLength: number;
+	compressed: boolean;
+}
+

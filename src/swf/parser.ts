@@ -1,36 +1,62 @@
+import { SwfHeader, SwfTag, SwfTagCode } from '../tags/tags';
 import { Bytes } from '../utils/bytes';
 
-export interface SwfHeader {
-    frameRate: number;
-    frameCount: number;
-    frameSize: { xMin: number, xMax: number, yMin: number, yMax: number };
-}
+export function parseSwf(dataView: DataView): { header: SwfHeader, tags: SwfTag[] } {
+    const bytes = new Bytes(dataView.buffer);
 
-export interface SwfTag {
-    code: number;
-    length: number;
-    data: Bytes;
-}
+    // Pular cabeçalho do arquivo (8 bytes)
+    bytes.skip(8);
 
-export function parseSwf(buffer: ArrayBuffer | DataView): { header: SwfHeader, tags: SwfTag[] } {
-    const bytes = buffer instanceof DataView ? new Bytes(buffer.buffer) : new Bytes(buffer);
-
+    // Ler cabeçalho SWF
     const frameSize = bytes.readRect();
-    const frameRate = bytes.readUint16() / 256;
+    const frameRate = bytes.readFixed8();
     const frameCount = bytes.readUint16();
 
-    const header: SwfHeader = { frameRate, frameCount, frameSize };
+    const header: SwfHeader = {
+        frameSize,
+        frameRate,
+        frameCount
+    };
+
+    // Ler tags
     const tags: SwfTag[] = [];
 
-    while (!bytes.eof) {
-        const tagCodeAndLength = bytes.readUint16();
-        const code = tagCodeAndLength >> 6;
-        let length = tagCodeAndLength & 0x3F;
-        if (length === 0x3F) length = bytes.readUint32();
+    while (!bytes.eof && bytes.remaining > 2) {
+        try {
+            const tag = parseTag(bytes);
+            tags.push(tag);
 
-        const data = length > 0 ? bytes.readBytes(length) : new Bytes(new ArrayBuffer(0));
-        tags.push({ code, length, data });
+            if (tag.code === SwfTagCode.End) {
+                break;
+            }
+        } catch (error) {
+            console.warn('Erro ao parsear tag:', error);
+            break;
+        }
     }
 
     return { header, tags };
 }
+
+function parseTag(bytes: Bytes): SwfTag {
+    const tagCodeAndLength = bytes.readUint16();
+    const code = (tagCodeAndLength >> 6) as SwfTagCode;
+    let length = tagCodeAndLength & 0x3F;
+
+    // Se length é 0x3F, ler length longo
+    if (length === 0x3F) {
+        length = bytes.readUint32();
+    }
+
+    // Ler dados da tag
+    const tagData = bytes.readBytes(length);
+
+    return {
+        code,
+        length,
+        data: tagData
+    };
+}
+
+export { SwfHeader, SwfTag, SwfTagCode };
+
