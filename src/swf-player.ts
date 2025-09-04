@@ -41,8 +41,18 @@ export class SWFPlayer {
 			console.log(`Frame rate: ${this.frameRate} fps`);
 			console.log(`Total de tags: ${tags.length}`);
 
+			// Log all tag types found
+			const tagTypes = tags.map(tag => ({ code: tag.code, name: this.getTagName(tag.code) }));
+			console.log('Tags encontradas:', tagTypes);
+
 			// Processar tags e construir timeline
 			this.buildTimeline(tags);
+
+			// If no frames were created, create a test frame
+			if (this.timeline.getTotalFrames() === 0) {
+				console.warn('No frames found in SWF, creating test content');
+				this.createTestContent();
+			}
 
 			// Renderizar primeiro frame
 			this.timeline.gotoFrame(0);
@@ -54,6 +64,90 @@ export class SWFPlayer {
 			console.error('Erro ao carregar SWF:', error);
 			throw error;
 		}
+	}
+
+	private getTagName(code: number): string {
+		const tagNames: { [key: number]: string } = {
+			0: 'End',
+			1: 'ShowFrame',
+			2: 'DefineShape',
+			4: 'PlaceObject',
+			5: 'RemoveObject',
+			9: 'SetBackgroundColor',
+			22: 'DefineShape2',
+			26: 'PlaceObject2',
+			28: 'RemoveObject2',
+			32: 'DefineShape3',
+			70: 'PlaceObject3',
+			83: 'DefineShape4'
+		};
+		return tagNames[code] || `Unknown(${code})`;
+	}
+
+	private createTestContent() {
+		console.log('Creating test content - red square');
+		
+		// Create a simple red square shape that should definitely render
+		const testShape = {
+			bounds: { xMin: 0, xMax: 2000, yMin: 0, yMax: 2000 }, // 100x100 pixels
+			fillStyles: [
+				{ type: 0x00, color: { r: 1, g: 0, b: 0, a: 1 } } // Red solid fill
+			],
+			lineStyles: [],
+			records: [
+				{
+					type: 'styleChange' as const,
+					moveTo: { x: 0, y: 0 },
+					fillStyle0: 1 // Use first fill style (1-indexed)
+				},
+				{
+					type: 'straightEdge' as const,
+					lineTo: { x: 2000, y: 0 }
+				},
+				{
+					type: 'straightEdge' as const,
+					lineTo: { x: 2000, y: 2000 }
+				},
+				{
+					type: 'straightEdge' as const,
+					lineTo: { x: 0, y: 2000 }
+				},
+				{
+					type: 'straightEdge' as const,
+					lineTo: { x: 0, y: 0 }
+				}
+			]
+		};
+
+		// Create a frame with the test shape
+		const frame: Frame = {
+			actions: [
+				{
+					type: 'defineShape',
+					data: { characterId: 1, shape: testShape }
+				},
+				{
+					type: 'placeObject',
+					data: {
+						characterId: 1,
+						depth: 1,
+						hasCharacter: true,
+						hasMatrix: true,
+						matrix: {
+							scaleX: 1,
+							scaleY: 1,
+							rotateSkew0: 0,
+							rotateSkew1: 0,
+							translateX: 2000, // Center horizontally (100px from left)
+							translateY: 2000  // Center vertically (100px from top)
+						}
+					}
+				}
+			]
+		};
+
+		this.timeline.addFrame(frame);
+		console.log('Test content created');
 	}
 
 	private buildTimeline(tags: any[]) {
@@ -71,6 +165,14 @@ export class SWFPlayer {
 					case SwfTagCode.DefineShape3:
 					case SwfTagCode.DefineShape4:
 						this.processDefineShape(tag, currentFrame, displayList);
+						break;
+
+					case SwfTagCode.DefineBits:
+					case SwfTagCode.DefineBitsJPEG2:
+					case SwfTagCode.DefineBitsJPEG3:
+					case SwfTagCode.DefineBitsLossless:
+					case SwfTagCode.DefineBitsLossless2:
+						this.processDefineBits(tag, currentFrame);
 						break;
 
 					case SwfTagCode.PlaceObject:
@@ -130,6 +232,68 @@ export class SWFPlayer {
 
 		} catch (error) {
 			console.warn(`Erro ao parsear shape ${characterId}:`, error);
+		}
+	}
+
+	private processDefineBits(tag: any, currentFrame: Frame) {
+		const data = tag.data;
+		let bitmapData: any;
+
+		try {
+			if (tag.code === SwfTagCode.DefineBits) {
+				const characterId = data.readUint16();
+				const bitmapFormat = data.readUint8();
+				const bitmapWidth = data.readUint16();
+				const bitmapHeight = data.readUint16();
+				const colorTableSize = data.readUint8();
+				const transparentColorIndex = data.readUint8();
+				const hasAlpha = (bitmapFormat & 0x20) !== 0;
+
+				bitmapData = {
+					characterId,
+					bitmapFormat,
+					bitmapWidth,
+					bitmapHeight,
+					colorTableSize,
+					transparentColorIndex,
+					hasAlpha
+				};
+
+				if (hasAlpha) {
+					// Alpha bitmap
+					data.readUint8(); // Skip reserved byte
+					bitmapData.alphaData = data.readBytes(bitmapWidth * bitmapHeight);
+				} else {
+					// Non-alpha bitmap
+					bitmapData.colorData = data.readBytes(bitmapWidth * bitmapHeight);
+				}
+
+			} else {
+				// JPEG or Lossless bitmap
+				const characterId = data.readUint16();
+				const bitmapDataLength = data.readUint32();
+				const bitmapDataStart = data.position;
+
+				bitmapData = {
+					characterId,
+					bitmapDataLength,
+					bitmapDataStart
+				};
+
+				data.position += bitmapDataLength; // Skip bitmap data
+			}
+
+			const action: FrameAction = {
+				type: 'defineBits',
+				data: bitmapData
+			};
+
+			currentFrame.actions.push(action);
+
+			console.log(`DefineBits: characterId=${bitmapData.characterId}, format=${bitmapData.bitmapFormat}, size=${bitmapData.bitmapWidth}x${bitmapData.bitmapHeight}`);
+
+		} catch (error) {
+			console.warn('Erro ao processar DefineBits:', error);
 		}
 	}
 
@@ -298,6 +462,54 @@ export class SWFPlayer {
 		return this.timeline.getTotalFrames();
 	}
 
+	// Test method to verify renderer works without SWF
+	testRenderer() {
+		console.log('Testing renderer with simple red square...');
+		
+		// Clear any existing timeline
+		this.timeline = new Timeline();
+		
+		this.createTestContent();
+		this.timeline.gotoFrame(0);
+		this.render();
+		
+		// Also test with direct WebGL rendering
+		this.testDirectWebGL();
+	}
+	
+	// Test direct WebGL rendering to isolate issues
+	private testDirectWebGL() {
+		console.log('Testing direct WebGL rendering...');
+		
+		// Create simple triangle vertices
+		const vertices = [
+			100, 100,  // Top
+			50, 200,   // Bottom left
+			150, 200   // Bottom right
+		];
+		
+		const colors = [
+			1, 0, 0, 1,  // Red
+			0, 1, 0, 1,  // Green
+			0, 0, 1, 1   // Blue
+		];
+		
+		try {
+			// Test if WebGL context is working
+			const gl = this.renderer['gl'];
+			console.log('WebGL context:', gl);
+			console.log('Canvas dimensions:', this.canvas.width, 'x', this.canvas.height);
+			
+			// Clear screen to verify WebGL is working
+			gl.clearColor(0.2, 0.3, 0.4, 1.0);
+			gl.clear(gl.COLOR_BUFFER_BIT);
+			
+			console.log('WebGL clear test completed');
+		} catch (error) {
+			console.error('WebGL test failed:', error);
+		}
+	}
+
 	private animate() {
 		if (!this.isPlaying) return;
 
@@ -318,17 +530,39 @@ export class SWFPlayer {
 		const displayList = this.timeline.getDisplayList();
 		const objects = displayList.getObjects();
 
-		const renderObjects: RenderObject[] = objects
-			.filter(obj => obj.visible && obj.shape)
-			.map(obj => ({
-				shape: obj.shape!,
-				matrix: obj.matrix,
-				colorTransform: obj.colorTransform,
-				depth: obj.depth,
-				characterId: obj.characterId
-			}));
+		console.log(`Rendering frame ${this.timeline.getCurrentFrame()}: ${objects.length} objects`);
+		
+		if (objects.length === 0) {
+			console.warn('No objects to render');
+			// Clear canvas with background color
+			this.renderer.render([]);
+			return;
+		}
 
+		const renderObjects: RenderObject[] = objects
+			.filter(obj => {
+				if (!obj.visible) {
+					console.log(`Object at depth ${obj.depth} is not visible`);
+					return false;
+				}
+				if (!obj.shape) {
+					console.log(`Object at depth ${obj.depth} has no shape`);
+					return false;
+				}
+				return true;
+			})
+			.map(obj => {
+				console.log(`Rendering object: depth=${obj.depth}, characterId=${obj.characterId}, shape records=${obj.shape?.records?.length || 0}`);
+				return {
+					shape: obj.shape!,
+					matrix: obj.matrix,
+					colorTransform: obj.colorTransform,
+					depth: obj.depth,
+					characterId: obj.characterId
+				};
+			});
+
+		console.log(`Final render objects: ${renderObjects.length}`);
 		this.renderer.render(renderObjects);
 	}
 }
-

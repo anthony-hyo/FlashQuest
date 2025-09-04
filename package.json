@@ -3,15 +3,18 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "build": "webpack --mode production",
-    "dev": "webpack serve --mode development",
-    "start": "webpack serve --mode development --host 0.0.0.0 --port 3000",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "bun run webpack --mode production",
+    "dev": "bun run webpack serve --mode development",
+    "start": "bun run webpack serve --mode development --host 0.0.0.0 --port 3000",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "clean": "rm -rf dist",
+    "build:dev": "bun run webpack --mode development",
+    "install-deps": "bun add pako && bun add -d @types/pako"
   },
   "keywords": ["swf", "flash", "webgl", "renderer", "animation"],
   "author": "SWF Renderer Team",
   "license": "MIT",
-  "description": "Renderizador SWF completo com WebGL",
+  "description": "Renderizador SWF completo com WebGL usando Bun",
   "devDependencies": {
     "@types/node": "^24.3.0",
     "html-webpack-plugin": "^5.6.4",
@@ -20,5 +23,11 @@
     "webpack": "^5.101.3",
     "webpack-cli": "^6.0.1",
     "webpack-dev-server": "^5.2.2"
+  },
+  "dependencies": {
+    "pako": "^2.1.0"
+  },
+  "optionalDependencies": {
+    "@types/pako": "^2.0.0"
   }
 }

@@ -1,5 +1,19 @@
 import {SWFFileHeader, SwfHeader, SwfTag, SwfTagCode} from '../tags/tags';
 
+// Try to import pako if available
+let pako: any = null;
+try {
+    // Dynamic import for pako since it might not be available
+    if (typeof window !== 'undefined') {
+        pako = (window as any).pako;
+    } else {
+        // For Node.js/Bun environment
+        pako = require('pako');
+    }
+} catch (error) {
+    console.warn('Pako library not available, will use fallback decompression');
+}
+
 export async function loadSwf(source: string | File): Promise<{ header: SWFFileHeader, dataView: DataView }> {
     let arrayBuffer: ArrayBuffer;
 
@@ -72,13 +86,15 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
 
 async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
     // Usar CompressionStream API se disponível
-    if ('CompressionStream' in window) {
+    if ('DecompressionStream' in window) {
         try {
             const stream = new DecompressionStream('deflate');
             const writer = stream.writable.getWriter();
             const reader = stream.readable.getReader();
 
-            writer.write(new Uint8Array(compressedData));
+            // Fix type issue by ensuring we have a proper Uint8Array
+            const properArray = new Uint8Array(compressedData);
+            writer.write(properArray);
             writer.close();
 
             const chunks: Uint8Array[] = [];
@@ -108,23 +124,49 @@ async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
         }
     }
 
-    // Fallback: implementação simples de inflate
+    // Fallback: usar pako.js se disponível, senão implementação simples
+    if (pako) {
+        try {
+            return pako.inflate(compressedData);
+        } catch (error) {
+            console.warn('Falha na descompressão com pako.js:', error);
+        }
+    }
+
+    // Último fallback: implementação muito básica
     return inflateSimple(compressedData);
 }
 
 function inflateSimple(data: Uint8Array): Uint8Array {
     // Implementação muito básica de inflate
     // Para uma implementação completa, seria necessário usar uma biblioteca como pako.js
-
-    // Por enquanto, apenas retorna os dados como estão
-    // Em um cenário real, você deveria usar uma biblioteca de descompressão
+    
     console.warn('Usando descompressão simplificada - pode não funcionar com todos os arquivos SWF');
+    
+    // Tentar detectar e pular cabeçalho zlib/deflate
+    let startOffset = 0;
+    let endOffset = data.length;
 
-    // Tentar pular cabeçalho zlib (2 bytes) e checksum (4 bytes no final)
-    if (data.length > 6) {
-        return data.slice(2, -4);
+    // Cabeçalho zlib típico
+    if (data.length >= 2) {
+        const header = (data[0] << 8) | data[1];
+        // Verificar se é um cabeçalho zlib válido
+        if ((header & 0x0F00) === 0x0800 && (header % 31) === 0) {
+            startOffset = 2; // Pular cabeçalho zlib
+            endOffset = data.length - 4; // Remover checksum Adler-32
+        }
     }
 
-    return data;
+    // Para arquivos não muito complexos, os dados podem estar em formato simples
+    // Esta é uma implementação muito limitada
+    const result = data.slice(startOffset, endOffset);
+    
+    // Tentar expandir dados se parecem estar comprimidos
+    if (result.length < data.length * 0.1) {
+        // Se resultado é muito pequeno, provavelmente falhou
+        console.warn('Descompressão pode ter falhado - considerando usar biblioteca externa');
+        return data; // Retornar dados originais
+    }
+    
+    return result;
 }
-

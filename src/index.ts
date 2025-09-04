@@ -164,6 +164,14 @@ class SWFRenderer {
     getTotalFrames(): number {
         return this.player.getTotalFrames();
     }
+
+    destroy() {
+        if (this.controls) {
+            this.controls.remove();
+            this.controls = null;
+        }
+        this.player.stop();
+    }
 }
 
 // Disponibilizar globalmente
@@ -206,19 +214,14 @@ function setupDragAndDrop(canvas: HTMLCanvasElement, renderer: SWFRenderer) {
             const file = files[0];
             if (file.name.toLowerCase().endsWith('.swf')) {
                 try {
-                    console.log('Carregando arquivo:', file.name);
                     await renderer.loadSWF(file);
-                    console.log('Arquivo carregado com sucesso!');
+                    console.log('Arquivo SWF carregado via drag & drop!');
                 } catch (error) {
-                    console.error('Erro ao carregar arquivo:', error);
-                    alert('Erro ao carregar arquivo SWF: ' + (error as Error).message);
+                    console.error('Erro ao carregar SWF via drag & drop:', error);
                 }
-            } else {
-                alert('Por favor, selecione um arquivo .swf');
             }
         }
     });
 }
 
 export default SWFRenderer;
-

@@ -149,22 +149,38 @@ export class Timeline {
 	}
 
 	private executeFrame(frame: Frame) {
+		console.log(`Executing frame with ${frame.actions.length} actions`);
+		
 		for (const action of frame.actions) {
+			console.log(`Executing action: ${action.type}`, action.data);
+			
 			switch (action.type) {
 				case 'placeObject':
 					this.displayList.placeObject(action.data as PlaceObjectData);
+					console.log(`Placed object at depth ${(action.data as PlaceObjectData).depth}`);
 					break;
 				case 'removeObject':
 					this.displayList.removeObject((action.data as any).depth);
+					console.log(`Removed object at depth ${(action.data as any).depth}`);
 					break;
 				case 'defineShape':
 					this.displayList.addShape(
 						(action.data as any).characterId,
 						(action.data as any).shape
 					);
+					console.log(`Defined shape ${(action.data as any).characterId}`);
+					break;
+				case 'defineBits':
+					// Handle bitmap definitions
+					console.log(`Defined bitmap ${(action.data as any).characterId}`);
+					break;
+				case 'setBackgroundColor':
+					console.log(`Set background color:`, action.data);
 					break;
 			}
 		}
+		
+		console.log(`After frame execution: ${this.displayList.getObjects().length} objects in display list`);
 	}
 }
 
@@ -174,7 +190,6 @@ export interface Frame {
 }
 
 export interface FrameAction {
-	type: 'placeObject' | 'removeObject' | 'defineShape' | 'setBackgroundColor';
+	type: 'placeObject' | 'removeObject' | 'defineShape' | 'setBackgroundColor' | 'defineBits';
 	data: any;
 }
-

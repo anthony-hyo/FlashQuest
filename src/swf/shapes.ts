@@ -326,16 +326,19 @@ function parseShapeRecords(data: Bytes, numFillStyles: number, numLineStyles: nu
 
                 const controlX = currentX + controlDeltaX;
                 const controlY = currentY + controlDeltaY;
-                currentX = controlX + anchorDeltaX;
-                currentY = controlY + anchorDeltaY;
+                const anchorX = controlX + anchorDeltaX;
+                const anchorY = controlY + anchorDeltaY;
+
+                currentX = anchorX;
+                currentY = anchorY;
 
                 records.push({
                     type: 'curvedEdge',
                     curveTo: {
                         controlX,
                         controlY,
-                        anchorX: currentX,
-                        anchorY: currentY
+                        anchorX,
+                        anchorY
                     }
                 });
             }
@@ -353,4 +356,3 @@ function readColor(data: Bytes, hasAlpha: boolean): Color {
 
     return { r, g, b, a };
 }
-
