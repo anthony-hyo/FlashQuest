@@ -33,18 +33,36 @@ export class Bytes {
     private bitPosition: number = 8;
     position: number = 0;
 
-    constructor(buffer: ArrayBuffer) {
-        this.view = new DataView(buffer);
+    constructor(buffer: ArrayBuffer | ArrayBufferLike) {
+        // Check if SharedArrayBuffer exists in the global scope before using it
+        const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+        
+        // If SharedArrayBuffer exists and the buffer is an instance of it
+        if (hasSharedArrayBuffer && (typeof SharedArrayBuffer === 'function') && buffer instanceof SharedArrayBuffer) {
+            const temp = new ArrayBuffer(buffer.byteLength);
+            new Uint8Array(temp).set(new Uint8Array(buffer));
+            this.view = new DataView(temp);
+        } else {
+            this.view = new DataView(buffer);
+        }
     }
 
     get remaining(): number {
         return this.view.byteLength - this.position;
     }
 
+    get eof(): boolean {
+        return this.position >= this.view.byteLength;
+    }
+
+    skip(bytes: number): void {
+        this.position += bytes;
+    }
+
     readUint8(): number {
         this.bitPosition = 8; // Reset bit position when reading bytes
         if (this.position >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         return this.view.getUint8(this.position++);
     }
@@ -52,7 +70,7 @@ export class Bytes {
     readUint16(): number {
         this.bitPosition = 8;
         if (this.position + 1 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getUint16(this.position, true);
         this.position += 2;
@@ -62,7 +80,7 @@ export class Bytes {
     readInt16(): number {
         this.bitPosition = 8;
         if (this.position + 1 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getInt16(this.position, true);
         this.position += 2;
@@ -72,7 +90,7 @@ export class Bytes {
     readUint32(): number {
         this.bitPosition = 8;
         if (this.position + 3 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getUint32(this.position, true);
         this.position += 4;
@@ -82,7 +100,7 @@ export class Bytes {
     readInt32(): number {
         this.bitPosition = 8;
         if (this.position + 3 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getInt32(this.position, true);
         this.position += 4;
@@ -100,7 +118,7 @@ export class Bytes {
     readFloat(): number {
         this.bitPosition = 8;
         if (this.position + 3 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getFloat32(this.position, true);
         this.position += 4;
@@ -110,7 +128,7 @@ export class Bytes {
     readDouble(): number {
         this.bitPosition = 8;
         if (this.position + 7 >= this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const value = this.view.getFloat64(this.position, true);
         this.position += 8;
@@ -131,7 +149,7 @@ export class Bytes {
         let result = '';
         while (true) {
             if (this.position >= this.view.byteLength) {
-                throw new ParserError('Unexpected end of data', SwfTagCode.End);
+                throw new Error('Unexpected end of data');
             }
             const byte = this.readUint8();
             if (byte === 0) break;
@@ -142,7 +160,7 @@ export class Bytes {
 
     readBytes(length: number): Bytes {
         if (this.position + length > this.view.byteLength) {
-            throw new ParserError('Unexpected end of data', SwfTagCode.End);
+            throw new Error('Unexpected end of data');
         }
         const bytes = new Bytes(this.view.buffer.slice(this.position, this.position + length));
         this.position += length;
@@ -168,7 +186,16 @@ export class Bytes {
     readSBits(bits: number): number {
         const value = this.readUBits(bits);
         const shift = 32 - bits;
+        // Convert to signed
         return (value << shift) >> shift;
+    }
+
+    readUnsignedBits(bits: number): number {
+        return this.readUBits(bits);
+    }
+
+    readSignedBits(bits: number): number {
+        return this.readSBits(bits);
     }
 
     readMatrix(): Matrix {

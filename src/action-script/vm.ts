@@ -1,5 +1,3 @@
-import { Frame, DisplayList } from '../../swf/display';
-
 interface ActionContext {
     variables: Map<string, any>;
     functions: Map<string, Function>;
@@ -136,7 +134,7 @@ export class ActionScriptVM {
                 break;
             case 4: // Register
                 const reg = actions[ip++];
-                this.stack.push(this.context.variables.get(reg));
+                this.stack.push(this.context.variables.get(reg.toString()));
                 break;
             case 5: // Boolean
                 this.stack.push(actions[ip++] !== 0);

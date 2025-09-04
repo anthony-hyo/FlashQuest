@@ -39,13 +39,13 @@ export class RenderBatch {
     canAdd(obj: RenderObject): boolean {
         if (this.count >= this.maxQuads) return false;
         if (this.currentTextureId === null) return true;
-        return this.currentTextureId === this.getTextureId(obj);
+        return this.currentTextureId === this.getTextureIdFromObject(obj);
     }
 
     add(obj: RenderObject, matrix: Float32Array): boolean {
         if (!this.canAdd(obj)) return false;
 
-        const texId = this.getTextureId(obj);
+        const texId = this.getTextureIdFromObject(obj);
         if (this.currentTextureId === null) this.currentTextureId = texId;
 
         const shape = obj.shape as Shape; // Handle morph shapes separately
@@ -115,14 +115,14 @@ export class RenderBatch {
         return this.currentTextureId;
     }
 
-    setTextureId(id: number | null) {
+    setTextureId(id: number | null): void {
         this.currentTextureId = id;
     }
 
-    private getTextureId(obj: RenderObject): number | null {
+    private getTextureIdFromObject(obj: RenderObject): number | null {
         const shape = obj.shape as Shape;
         const fillStyle = shape.fillStyles[0];
-        return fillStyle && fillStyle.type >= 0x40 ? fillStyle.bitmapId : null;
+        return fillStyle && fillStyle.type >= 0x40 ? (fillStyle.bitmapId ?? null) : null;
     }
 
     private getColor(fillStyle: any): Color {

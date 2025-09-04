@@ -1,5 +1,6 @@
 import { Shape, Color, FillStyle } from '../swf/shapes';
 import { Matrix, ColorTransform } from '../utils/bytes';
+import { MorphShape } from '../swf/morph-shapes';
 
 export interface RenderObject {
     shape: Shape | MorphShape;
@@ -110,11 +111,41 @@ export class WebGLRenderer {
     private batchCache: Map<string, Float32Array> = new Map();
     private lastFrameObjects: string = '';
 
-    private maskStack: number[] = [];
+    private maskStack: RenderObject[] = [];
     private frameBuffer: WebGLFramebuffer | null = null;
     private maskTexture: WebGLTexture | null = null;
     private batchManager: RenderBatch;
     private readonly BATCH_SIZE = 1024; // Maximum number of quads per batch
+
+    // Shader attributes and uniforms
+    private aVertexPosition: number;
+    private aVertexColor: number;
+    private uProjectionMatrix: WebGLUniformLocation;
+    private uModelViewMatrix: WebGLUniformLocation;
+    private aGradientPosition: number;
+    private aGradientUV: number;
+    private uGradientProjectionMatrix: WebGLUniformLocation;
+    private uGradientModelViewMatrix: WebGLUniformLocation;
+    private uGradientColors: WebGLUniformLocation;
+    private uGradientStops: WebGLUniformLocation;
+    private uGradientType: WebGLUniformLocation;
+    private uGradientFocalPoint: WebGLUniformLocation;
+    private aBitmapPosition: number;
+    private aBitmapUV: number;
+    private uBitmapProjectionMatrix: WebGLUniformLocation;
+    private uBitmapModelViewMatrix: WebGLUniformLocation;
+    private uBitmapTexture: WebGLUniformLocation;
+    
+    // Buffers
+    private vertexBuffer: WebGLBuffer;
+    private colorBuffer: WebGLBuffer;
+    private uvBuffer: WebGLBuffer;
+    
+    // State
+    private backgroundColor: Color = { r: 1, g: 1, b: 1, a: 1 };
+
+    // Textures storage
+    private textures: Map<number, WebGLTexture> = new Map();
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -458,7 +489,7 @@ export class WebGLRenderer {
         this.gl.useProgram(this.shaderProgram);
         
         // Set up shared uniforms
-        const projection = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
         this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
 
         for (const obj of objects) {
@@ -494,6 +525,18 @@ export class WebGLRenderer {
 
         // Render final batch
         this.renderBatch();
+    }
+
+    private flushGradientBatch(objects: RenderObject[]) {
+        this.gl.useProgram(this.gradientShaderProgram);
+        // Implementation similar to flushSolidBatch but using gradient shader
+        // TODO: Complete gradient rendering implementation
+    }
+
+    private flushBitmapBatch(objects: RenderObject[], bitmapId: number) {
+        this.gl.useProgram(this.bitmapShaderProgram);
+        // Implementation similar to flushSolidBatch but using bitmap shader
+        // TODO: Complete bitmap rendering implementation
     }
 
     private renderBatch() {
@@ -586,7 +629,7 @@ export class WebGLRenderer {
         this.gl.useProgram(this.shaderProgram);
 
         // Set up uniforms
-        const projection = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
+        const projection = this.createOrthographicMatrix(this.canvas.width, this.canvas.height);
         const modelView = this.createModelViewMatrix(mask.matrix);
         this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
         this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
@@ -618,6 +661,106 @@ export class WebGLRenderer {
         }
     }
 
+    private createOrthographicMatrix(width: number, height: number): Float32Array {
+        return new Float32Array([
+            2 / width, 0, 0, 0,
+            0, -2 / height, 0, 0,
+            0, 0, 1, 0,
+            -1, 1, 0, 1
+        ]);
+    }
+    
+    private createModelViewMatrix(matrix?: Matrix): Float32Array {
+        // Default to identity matrix if no matrix provided
+        if (!matrix) {
+            return new Float32Array([
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1
+            ]);
+        }
+        
+        // Convert Flash matrix to WebGL matrix
+        return new Float32Array([
+            matrix.scaleX || 1, matrix.rotateSkew0 || 0, 0, 0,
+            matrix.rotateSkew1 || 0, matrix.scaleY || 1, 0, 0,
+            0, 0, 1, 0,
+            matrix.translateX || 0, matrix.translateY || 0, 0, 1
+        ]);
+    }
+    
+    private triangulateShape(shape: Shape | MorphShape): { vertices: number[], indices: number[], colors: number[] } {
+        // Implementation for shape triangulation
+        // This is a placeholder implementation; in a real application, this would properly triangulate the shape
+        
+        // For MorphShape, we need to handle differently
+        if ('startEdges' in shape) {
+            // This is a MorphShape - use startEdges for now
+            // In a complete implementation, you would interpolate between start and end shapes based on ratio
+            return {
+                vertices: shape.startEdges.vertices,
+                indices: shape.startEdges.indices,
+                colors: new Array(shape.startEdges.vertices.length * 2).fill(1.0) // Default white color
+            };
+        }
+        
+        // Regular Shape
+        const vertices: number[] = [];
+        const indices: number[] = [];
+        const colors: number[] = [];
+        
+        // Extract vertices from shape records
+        let currentX = 0;
+        let currentY = 0;
+        let vertexIndex = 0;
+        
+        // Process shape records to extract vertices
+        for (const record of shape.records) {
+            if (record.type === 'styleChange' && record.moveTo) {
+                currentX = record.moveTo.x;
+                currentY = record.moveTo.y;
+                vertices.push(currentX, currentY);
+                
+                // Add default color (white)
+                colors.push(1.0, 1.0, 1.0, 1.0);
+                vertexIndex++;
+            } else if (record.type === 'straightEdge' && record.lineTo) {
+                currentX = record.lineTo.x;
+                currentY = record.lineTo.y;
+                vertices.push(currentX, currentY);
+                
+                // Add default color (white)
+                colors.push(1.0, 1.0, 1.0, 1.0);
+                vertexIndex++;
+                
+                // Create triangle if we have enough vertices
+                if (vertexIndex >= 3) {
+                    indices.push(vertexIndex - 3, vertexIndex - 2, vertexIndex - 1);
+                }
+            } else if (record.type === 'curvedEdge' && record.curveTo) {
+                // For curves, add both control and anchor points
+                // In a real implementation, you'd tessellate the curve
+                currentX = record.curveTo.anchorX;
+                currentY = record.curveTo.anchorY;
+                vertices.push(record.curveTo.controlX, record.curveTo.controlY);
+                vertices.push(currentX, currentY);
+                
+                // Add default colors
+                colors.push(1.0, 1.0, 1.0, 1.0);
+                colors.push(1.0, 1.0, 1.0, 1.0);
+                vertexIndex += 2;
+                
+                // Create triangles if we have enough vertices
+                if (vertexIndex >= 3) {
+                    indices.push(vertexIndex - 3, vertexIndex - 2, vertexIndex - 1);
+                }
+            }
+        }
+        
+        return { vertices, indices, colors };
+    }
+
     /**
      * WebGL-based Flash renderer with support for:
      * - Basic shapes, gradients, and bitmaps
@@ -627,6 +770,45 @@ export class WebGLRenderer {
      * - Optimized batching for improved performance
      * - Proper resource management and cleanup
      */
+    
+    // Add destroy and deleteTexture methods to WebGLRenderer
+    public destroy() {
+        // Clean up WebGL resources
+        
+        // Delete all textures
+        this.textures.forEach((texture) => {
+            this.gl.deleteTexture(texture);
+        });
+        this.textures.clear();
+        
+        // Delete buffers
+        this.gl.deleteBuffer(this.vertexBuffer);
+        this.gl.deleteBuffer(this.colorBuffer);
+        this.gl.deleteBuffer(this.uvBuffer);
+        
+        // Delete shaders and programs
+        this.gl.deleteProgram(this.shaderProgram);
+        this.gl.deleteProgram(this.gradientShaderProgram);
+        this.gl.deleteProgram(this.bitmapShaderProgram);
+        this.gl.deleteProgram(this.colorTransformShaderProgram);
+        this.gl.deleteProgram(this.filterShaderProgram);
+        
+        // Delete framebuffer and mask texture
+        if (this.frameBuffer) {
+            this.gl.deleteFramebuffer(this.frameBuffer);
+        }
+        if (this.maskTexture) {
+            this.gl.deleteTexture(this.maskTexture);
+        }
+    }
+
+    public deleteTexture(id: number) {
+        const texture = this.textures.get(id);
+        if (texture) {
+            this.gl.deleteTexture(texture);
+            this.textures.delete(id);
+        }
+    }
 }
 
 // NOTE: This renderer supports basic shapes, gradients, and bitmaps.

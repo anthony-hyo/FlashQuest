@@ -5,12 +5,13 @@ import { DisplayList, Timeline, Frame } from './swf/display';
 import { SwfTagCode } from "./tags/tags";
 import { TagHandlerRegistry } from './tags/tag-handler';
 import { ShapeTagHandler } from './tags/handlers/shape-handler';
-import { ButtonTagHandler } from './tags/handlers/button-handler';
-import { SoundTagHandler } from './tags/handlers/sound-handler';
-import { SpriteTagHandler } from './tags/handlers/sprite-handler';
+import { ButtonHandler } from './tags/handlers/button-handler';
+import { SoundHandler } from './tags/handlers/sound-handler';
+import { SpriteHandler } from './tags/handlers/sprite-handler';
 import { FilterHandler } from './tags/handlers/filter-handler';
 import { MorphShapeHandler } from './tags/handlers/morph-shape-handler';
 import { ActionScriptHandler } from './tags/handlers/action-script-handler';
+import { TagData } from './tags/tag-handler';
 
 export class SWFPlayer {
     private canvas: HTMLCanvasElement;
@@ -20,19 +21,19 @@ export class SWFPlayer {
     private frameRate: number = 12;
     private animationId: number | null = null;
     private lastFrameTime: number = 0;
-    private tagHandlers: TagHandlerRegistry;
+    private tagHandlers: TagHandlerRegistry = new TagHandlerRegistry();
     private resourceCache: Map<number, any> = new Map();
     private interactiveObjects: Map<number, any> = new Map();
-    private soundHandler: SoundTagHandler;
-    private spriteHandler: SpriteTagHandler;
+    private soundHandler: SoundHandler;
+    private spriteHandler: SpriteHandler;
     private actionScriptHandler: ActionScriptHandler;
     private shapeHandler: ShapeTagHandler;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
         this.renderer = new WebGLRenderer(canvas);
-        this.soundHandler = new SoundTagHandler();
-        this.spriteHandler = new SpriteTagHandler();
+        this.soundHandler = new SoundHandler();
+        this.spriteHandler = new SpriteHandler();
         this.actionScriptHandler = new ActionScriptHandler();
         this.shapeHandler = new ShapeTagHandler();
         this.initTagHandlers();
@@ -54,7 +55,7 @@ export class SWFPlayer {
         this.tagHandlers.register([
             SwfTagCode.DefineButton,
             SwfTagCode.DefineButton2
-        ], new ButtonTagHandler());
+        ], new ButtonHandler());
 
         // Register sound handler
         this.tagHandlers.register([

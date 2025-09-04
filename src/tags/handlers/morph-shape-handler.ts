@@ -3,6 +3,7 @@ import { SwfTagCode } from '../tags';
 import { Frame, DisplayList } from '../../swf/display';
 import { Shape, Color } from '../../swf/shapes';
 import { Matrix } from '../../utils/bytes';
+import { MorphShape } from '../../swf/morph-shapes';
 
 // MorphShape support and interpolation
 export interface MorphShapeData {
@@ -52,6 +53,16 @@ export class MorphShapeHandler extends BaseTagHandler {
                 const morphShape: MorphShape = {
                     startShape,
                     endShape,
+                    startEdges: {
+                        vertices: [],
+                        indices: []
+                    },
+                    endEdges: {
+                        vertices: [],
+                        indices: []
+                    },
+                    startFills: [],
+                    endFills: [],
                     ratio: 0 // Initial ratio
                 };
 

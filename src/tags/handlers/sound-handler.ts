@@ -184,7 +184,10 @@ export class SoundHandler extends BaseTagHandler {
             // For now, we only handle uncompressed PCM
             // TODO: Add support for MP3, ADPCM formats
             if (format === 0) { // PCM
-                return await this.audioContext.decodeAudioData(data.buffer);
+                // Create a new ArrayBuffer with the contents of data to ensure it's not a SharedArrayBuffer
+                const arrayBuffer = new ArrayBuffer(data.byteLength);
+                new Uint8Array(arrayBuffer).set(data);
+                return await this.audioContext.decodeAudioData(arrayBuffer);
             }
             console.warn('Unsupported audio format:', format);
             return null;
@@ -242,7 +245,7 @@ export class SoundHandler extends BaseTagHandler {
         }
     }
 
-    private applyEnvelope(gainNode: GainParam, envelope: any[]): void {
+    private applyEnvelope(gainNode: GainNode, envelope: any[]): void {
         const gain = gainNode.gain;
         envelope.forEach((point, index) => {
             const time = point.position / 44100; // Convert samples to seconds

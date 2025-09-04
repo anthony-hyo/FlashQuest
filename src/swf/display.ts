@@ -9,6 +9,9 @@ export interface DisplayObject {
 	visible: boolean;
 	shape?: Shape;
 	bounds?: { xMin: number; xMax: number; yMin: number; yMax: number };
+	ratio?: number;       // For morph shapes
+	clipDepth?: number;   // For masking
+	isMask?: boolean;     // Whether this object is a mask
 }
 
 export interface PlaceObjectData {

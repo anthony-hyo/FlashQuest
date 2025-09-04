@@ -44,7 +44,7 @@ export class BlendModeManager {
             name: 'lighten',
             srcFactor: WebGLRenderingContext.ONE,
             dstFactor: WebGLRenderingContext.ONE,
-            equation: WebGLRenderingContext.MAX,
+            equation: 0x8008, // EXT_blend_minmax.MAX_EXT constant value
             shader: `
                 vec4 blend(vec4 src, vec4 dst) {
                     return max(src, dst);
@@ -55,7 +55,7 @@ export class BlendModeManager {
             name: 'darken',
             srcFactor: WebGLRenderingContext.ONE,
             dstFactor: WebGLRenderingContext.ONE,
-            equation: WebGLRenderingContext.MIN,
+            equation: 0x8007, // EXT_blend_minmax.MIN_EXT constant value
             shader: `
                 vec4 blend(vec4 src, vec4 dst) {
                     return min(src, dst);

@@ -55,15 +55,15 @@ export type Filter = DropShadowFilter | BlurFilter | ConvolutionFilter;
 
 export class FilterShaderGenerator {
     generateShader(filter: Filter): { vs: string; fs: string } {
-        switch (filter.type) {
+        switch ((filter as FilterBase).type) {
             case FilterType.DropShadow:
-                return this.generateDropShadowShader(filter);
+                return this.generateDropShadowShader(filter as DropShadowFilter);
             case FilterType.Blur:
-                return this.generateBlurShader(filter);
+                return this.generateBlurShader(filter as BlurFilter);
             case FilterType.Convolution:
-                return this.generateConvolutionShader(filter);
+                return this.generateConvolutionShader(filter as ConvolutionFilter);
             default:
-                throw new Error(`Unsupported filter type: ${filter.type}`);
+                throw new Error(`Unsupported filter type: ${(filter as FilterBase).type}`);
         }
     }
 

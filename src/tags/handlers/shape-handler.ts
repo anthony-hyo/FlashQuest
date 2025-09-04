@@ -63,11 +63,11 @@ export class ShapeTagHandler extends BaseTagHandler {
         }
 
         const offset = data.readUint32();
-        const startShape = parseMorphShape(data, tagCode, 'start');
+        const startShape = parseShape(data, SwfTagCode.DefineShape3);  // Morph shapes use Shape3 format
         
         // Position data stream at end shape offset
         data.position = offset;
-        const endShape = parseMorphShape(data, tagCode, 'end');
+        const endShape = parseShape(data, SwfTagCode.DefineShape3);  // Morph shapes use Shape3 format
 
         return {
             startShape,

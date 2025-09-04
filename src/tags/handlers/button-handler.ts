@@ -2,7 +2,7 @@ import { BaseTagHandler, TagData } from '../tag-handler';
 import { SwfTagCode } from '../tags';
 import { Frame, DisplayList } from '../../swf/display';
 
-export class ButtonTagHandler extends BaseTagHandler {
+export class ButtonHandler extends BaseTagHandler {
     private buttonStates: Map<number, any> = new Map();
 
     canHandle(tag: TagData): boolean {
@@ -12,11 +12,11 @@ export class ButtonTagHandler extends BaseTagHandler {
         ].includes(tag.code);
     }
 
-    handle(tag: TagData, frame: Frame, displayList: DisplayList): void {
+    async handle(tag: TagData, frame: Frame, displayList: DisplayList): Promise<void> {
         try {
             const data = tag.data;
             const buttonId = data.readUint16();
-            const buttonData = this.parseButtonData(tag);
+            const buttonData = await this.parseButtonData(tag);
 
             frame.actions.push({
                 type: 'defineButton',
@@ -27,20 +27,14 @@ export class ButtonTagHandler extends BaseTagHandler {
             });
 
             // Store button state for interactivity
-            this.buttonStates.set(buttonId, {
-                up: buttonData.up,
-                over: buttonData.over,
-                down: buttonData.down,
-                hit: buttonData.hit,
-                actions: buttonData.actions
-            });
+            this.buttonStates.set(buttonId, buttonData);
 
         } catch (error) {
             this.handleError(tag, error as Error);
         }
     }
 
-    private parseButtonData(tag: TagData) {
+    private async parseButtonData(tag: TagData) {
         const data = tag.data;
         const isButton2 = tag.code === SwfTagCode.DefineButton2;
         
@@ -53,7 +47,7 @@ export class ButtonTagHandler extends BaseTagHandler {
         };
 
         // Parse button actions
-        const actions = isButton2 ? this.parseButton2Actions(data) : this.parseButtonActions(data);
+        const actions = isButton2 ? await this.parseButton2Actions(data) : await this.parseButtonActions(data);
 
         return {
             ...states,
@@ -61,7 +55,7 @@ export class ButtonTagHandler extends BaseTagHandler {
         };
     }
 
-    private parseButtonActions(data: any) {
+    private async parseButtonActions(data: any) {
         // Parse DefineButton actions
         const actions = [];
         while (data.remaining > 0) {
@@ -73,7 +67,7 @@ export class ButtonTagHandler extends BaseTagHandler {
         return actions;
     }
 
-    private parseButton2Actions(data: any) {
+    private async parseButton2Actions(data: any) {
         // Parse DefineButton2 actions with extended features
         const actions = [];
         const buttonSize = data.readUint16();

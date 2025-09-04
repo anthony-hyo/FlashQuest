@@ -1,5 +1,6 @@
 import { SwfTagCode } from './tags';
 import { Frame, DisplayList } from '../swf/display';
+import { parseShape } from './handlers/shape-parser';
 
 // Base interface for tag data
 export interface TagData {
@@ -65,7 +66,7 @@ export class ShapeTagHandler extends BaseTagHandler {
     ].includes(tag.code);
   }
 
-  handle(tag: TagData, frame: Frame, displayList: DisplayList) {
+  handle(tag: TagData, frame: Frame, displayList: DisplayList): Promise<void> {
     try {
       const data = tag.data;
       const characterId = data.readUint16();
@@ -77,8 +78,10 @@ export class ShapeTagHandler extends BaseTagHandler {
       });
 
       displayList.addShape(characterId, shape);
+      return Promise.resolve();
     } catch (error) {
       this.handleError(tag, error as Error);
+      return Promise.reject(error);
     }
   }
 }

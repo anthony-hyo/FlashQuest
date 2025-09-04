@@ -14,6 +14,7 @@ export interface FillStyle {
     gradient?: Gradient;
     bitmapId?: number;
     bitmapMatrix?: Matrix;
+    matrix?: Matrix; // Add matrix property for gradient fills
 }
 
 export interface LineStyle {
@@ -29,6 +30,7 @@ export interface LineStyle {
     endCapStyle?: number;
     miterLimitFactor?: number;
     fillType?: FillStyle;
+    noHScale?: boolean; // Added alias for noHScaleFlag
 }
 
 export interface Gradient {
@@ -62,6 +64,15 @@ export interface Shape {
     fillStyles: FillStyle[];
     lineStyles: LineStyle[];
     records: ShapeRecord[];
+}
+
+export interface MorphShape {
+    startShape: any;
+    endShape: any;
+    bounds: {
+        start: { xMin: number; xMax: number; yMin: number; yMax: number };
+        end: { xMin: number; xMax: number; yMin: number; yMax: number };
+    };
 }
 
 export function parseShape(data: Bytes, shapeVersion: number): Shape {
@@ -348,6 +359,24 @@ function parseShapeRecords(data: Bytes, numFillStyles: number, numLineStyles: nu
     return records;
 }
 
+export function parseMorphShape(bytes: Bytes): MorphShape {
+    const startBounds = bytes.readRect();
+    const endBounds = bytes.readRect();
+    
+    // Use DefineShape3 for morph shapes
+    const startShape = parseShape(bytes, SwfTagCode.DefineShape3);
+    const endShape = parseShape(bytes, SwfTagCode.DefineShape3);
+    
+    return {
+        startShape,
+        endShape,
+        bounds: {
+            start: startBounds,
+            end: endBounds
+        }
+    };
+}
+
 function readColor(data: Bytes, hasAlpha: boolean): Color {
     const r = data.readUint8() / 255;
     const g = data.readUint8() / 255;
@@ -356,4 +385,3 @@ function readColor(data: Bytes, hasAlpha: boolean): Color {
 
     return { r, g, b, a };
 }
-
