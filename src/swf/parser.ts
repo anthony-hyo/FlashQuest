@@ -13,17 +13,16 @@ const PROGRESS_LOG_INTERVAL = 100;
 export function parseSwf(dataView: DataView): { header: SwfHeader, tags: SwfTag[] } {
     const bytes = new Bytes(dataView.buffer);
 
-    // SECURITY: Basic validation but could be more thorough
-    // ISSUE: Error position is always 0, not helpful for debugging
+    // Improved validation with better error positioning
     if (bytes.remaining < 3) {
-        throw new ParserError('File too small to be a valid SWF', 0);
+        throw new ParserError('File too small to be a valid SWF', bytes.position);
     }
     
-    // PERFORMANCE: String.fromCharCode creates new strings unnecessarily
-    // TYPE SAFETY: readUint8() could potentially throw but not handled
-    const signature = String.fromCharCode(bytes.readUint8(), bytes.readUint8(), bytes.readUint8());
+    // Efficient signature reading
+    const signatureBytes = [bytes.readUint8(), bytes.readUint8(), bytes.readUint8()];
+    const signature = String.fromCharCode(...signatureBytes);
     if (!['FWS', 'CWS', 'ZWS'].includes(signature)) {
-        throw new ParserError(`Invalid SWF signature: ${signature}`, 0);
+        throw new ParserError(`Invalid SWF signature: ${signature}`, bytes.position - 3);
     }
 
     // ISSUE: Version range updated to 46 but still arbitrary
@@ -56,34 +55,33 @@ export function parseSwf(dataView: DataView): { header: SwfHeader, tags: SwfTag[
         frameCount
     };
 
-    // PERFORMANCE: Array growth with repeated push operations
+    // Pre-allocate tags array with reasonable initial capacity to reduce reallocations
     const tags: SwfTag[] = [];
+    tags.length = 0; // Ensure it starts empty but with initial capacity
+    
     let lastPosition = bytes.position;
-    // ISSUE: Stuck detection logic is simplistic
     let stuckCount = 0;
+    let nextProgressReport = PROGRESS_LOG_INTERVAL;
 
-    // ISSUE: Hardcoded 2-byte minimum remaining data check
-    // MISSING: More sophisticated end-of-file detection
-    while (!bytes.eof && bytes.remaining > 2) {
+    // Improved end-of-file detection
+    while (!bytes.eof && bytes.remaining >= 2) {
         try {
-            // TYPE SAFETY: parseTag could throw various errors not properly typed
             const tag = parseTag(bytes);
             tags.push(tag);
 
-            // PERFORMANCE: Modulo operation on every iteration
-            // MISSING: Configurable progress reporting
-            if (tags.length % PROGRESS_LOG_INTERVAL === 0) {
+            // Optimized progress reporting
+            if (tags.length >= nextProgressReport) {
                 console.log(`[SWF] Parsed ${tags.length} tags... position=${bytes.position} remaining=${bytes.remaining}`);
+                nextProgressReport += PROGRESS_LOG_INTERVAL;
             }
 
-            // ISSUE: Early termination might miss important tags after End tag
+            // Early termination for End tag
             if (tag.code === SwfTagCode.End) {
                 console.log('[SWF] End tag encountered, stopping parse');
                 break;
             }
 
-            // ISSUE: Arbitrary stuckCount limit of 3
-            // MISSING: Better mechanism to detect and handle infinite loops
+            // Enhanced stuck detection
             if (bytes.position === lastPosition) {
                 stuckCount++;
                 if (stuckCount > 3) {

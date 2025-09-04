@@ -2,17 +2,17 @@ import { Bytes, Matrix } from '../utils/bytes';
 import { SwfTagCode } from '../tags/tags';
 
 export interface Color {
-    r: number; // ISSUE: Range not specified - should be 0-255 or 0-1?
-    g: number;
-    b: number;
-    a: number;
+    readonly r: number; // 0-255
+    readonly g: number; // 0-255
+    readonly b: number; // 0-255
+    readonly a: number; // 0-255
 }
 
 export interface NormalizedColor {
-    r: number; // 0-1
-    g: number; // 0-1
-    b: number; // 0-1
-    a: number; // 0-1
+    readonly r: number; // 0-1
+    readonly g: number; // 0-1
+    readonly b: number; // 0-1
+    readonly a: number; // 0-1
 }
 
 export enum FillStyleType {
@@ -24,19 +24,18 @@ export enum FillStyleType {
     ClippedBitmap = 0x41,
     NonSmoothedRepeatingBitmap = 0x42,
     NonSmoothedClippedBitmap = 0x43
-    // MISSING: Additional gradient types from newer SWF versions
 }
 
 export interface FillStyle {
-    type: FillStyleType;
-    color?: NormalizedColor;
-    gradient?: Gradient;
-    bitmapId?: number;
-    bitmapMatrix?: Matrix;
-    matrix?: Matrix; // Add matrix property for gradient fills
-    repeating?: boolean; // For bitmap fills
-    // MISSING: Focus ratio for focal gradients
-    // MISSING: Interpolation mode for gradients
+    readonly type: FillStyleType;
+    readonly color?: NormalizedColor;
+    readonly gradient?: Gradient;
+    readonly bitmapId?: number;
+    readonly bitmapMatrix?: Matrix;
+    readonly matrix?: Matrix;
+    readonly repeating?: boolean;
+    readonly focalRatio?: number; // For focal gradients
+    readonly interpolationMode?: number; // For gradients
 }
 
 export interface LineStyle {
@@ -227,7 +226,7 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         // For DefineShape4, this often indicates the data stream is misaligned
         // Try to recover by scanning for more reasonable values
         console.log(`[SWF] Attempting recovery scan from position ${data.position - 1}`);
-        data.position = data.position - 1; // Go back to re-read
+        data.seek(data.position - 1); // Go back to re-read
         
         // Scan forward looking for a reasonable fill style count (0-10)
         for (let i = 0; i < 20 && !data.eof; i++) {
@@ -292,7 +291,7 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
     
     try {
         const originalPosition = data.position;
-        data.position = startPos;
+        data.seek(startPos);
         const rawBytes: number[] = [];
         const scanLimit = Math.min(COLOR_RECOVERY_SCAN_LIMIT, data.remaining);
         
@@ -306,8 +305,8 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
         // Look for SWF fill style patterns
         let recoveredColor: NormalizedColor | null = null;
         
-        // LOGIC ERROR: This loop may access out-of-bounds indices (i+3)
-        for (let i = 0; i < rawBytes.length - 4; i++) {
+        // Fixed bounds check
+        for (let i = 0; i < rawBytes.length - 3; i++) {
             if (rawBytes[i] === FillStyleType.Solid) {
                 // Found solid fill type marker
                 const r = rawBytes[i + 1] / 255;
@@ -339,7 +338,7 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
         }
         
         // Restore original position after recovery attempt
-        data.position = originalPosition;
+        data.seek(originalPosition);
         
         return [{
             type: FillStyleType.Solid,
@@ -363,43 +362,51 @@ function isValidColorPattern(r: number, g: number, b: number): boolean {
 }
 
 function parseSingleFillStyle(data: Bytes, fillType: FillStyleType, shapeVersion: number): FillStyle {
-    const fillStyle: FillStyle = { type: fillType };
-
     switch (fillType) {
-        case FillStyleType.Solid:
+        case FillStyleType.Solid: {
             const colorBytes = shapeVersion >= SwfTagCode.DefineShape3 ? 4 : 3;
             if (data.remaining < colorBytes) {
                 throw new Error(`Insufficient data for solid fill color`);
             }
-            fillStyle.color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
-            break;
+            return {
+                type: FillStyleType.Solid,
+                color: readColor(data, shapeVersion >= SwfTagCode.DefineShape3)
+            };
+        }
 
         case FillStyleType.LinearGradient:
         case FillStyleType.RadialGradient:
-        case FillStyleType.FocalGradient:
-            fillStyle.matrix = data.readMatrix();
-            fillStyle.gradient = parseGradient(data, fillType, shapeVersion);
-            break;
+        case FillStyleType.FocalGradient: {
+            return {
+                type: fillType,
+                matrix: data.readMatrix(),
+                gradient: parseGradient(data, fillType, shapeVersion)
+            };
+        }
 
         case FillStyleType.RepeatingBitmap:
-        case FillStyleType.NonSmoothedRepeatingBitmap:
-            fillStyle.repeating = true;
-            fillStyle.bitmapId = data.readUint16();
-            fillStyle.bitmapMatrix = data.readMatrix();
-            break;
+        case FillStyleType.NonSmoothedRepeatingBitmap: {
+            return {
+                type: fillType,
+                repeating: true,
+                bitmapId: data.readUint16(),
+                bitmapMatrix: data.readMatrix()
+            };
+        }
             
         case FillStyleType.ClippedBitmap:
-        case FillStyleType.NonSmoothedClippedBitmap:
-            fillStyle.repeating = false;
-            fillStyle.bitmapId = data.readUint16();
-            fillStyle.bitmapMatrix = data.readMatrix();
-            break;
+        case FillStyleType.NonSmoothedClippedBitmap: {
+            return {
+                type: fillType,
+                repeating: false,
+                bitmapId: data.readUint16(),
+                bitmapMatrix: data.readMatrix()
+            };
+        }
 
         default:
             throw new Error(`Unknown fill type: 0x${(fillType as number).toString(16)}`);
     }
-
-    return fillStyle;
 }
 
 // Constants for line styles

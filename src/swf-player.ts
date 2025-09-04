@@ -12,46 +12,126 @@ import { FilterHandler } from './tags/handlers/filter-handler';
 import { MorphShapeHandler } from './tags/handlers/morph-shape-handler';
 import { ActionScriptHandler } from './tags/handlers/action-script-handler';
 import { TagData } from './tags/tag-handler';
+import { Matrix } from './utils/bytes';
 
-interface InteractiveObject {
-    id: number;
-    shape: any; // TYPE SAFETY: Should be properly typed Shape interface
-    matrix?: any; // TYPE SAFETY: Should be Matrix interface
-    handleMouseDown?: () => void;
-    handleMouseUp?: () => void;
-    handleMouseOver?: () => void;
-    handleMouseOut?: () => void;
-    isOver?: boolean;
+interface Shape {
+    readonly id: number;
+    readonly fillStyles?: any[];
+    readonly lineStyles?: any[];
+    readonly paths?: any[];
+    readonly bounds?: {
+        readonly xMin: number;
+        readonly xMax: number;
+        readonly yMin: number;
+        readonly yMax: number;
+    };
 }
 
+interface SWFResource {
+    id: number;
+    type: 'shape' | 'sprite' | 'sound' | 'bitmap' | 'font';
+    data: any;
+}
+
+interface MouseEventHandler {
+    (): void;
+}
+
+interface TouchEventHandler {
+    (touches: TouchList): void;
+}
+
+interface KeyboardEventHandler {
+    (key: string, isPressed: boolean): void;
+}
+
+interface InteractiveObject {
+    readonly id: number;
+    readonly shape: Shape;
+    readonly matrix?: Matrix;
+    readonly handleMouseDown?: MouseEventHandler;
+    readonly handleMouseUp?: MouseEventHandler;
+    readonly handleMouseOver?: MouseEventHandler;
+    readonly handleMouseOut?: MouseEventHandler;
+    readonly handleTouchStart?: TouchEventHandler;
+    readonly handleTouchEnd?: TouchEventHandler;
+    isOver?: boolean;
+    isPressed?: boolean;
+}
+
+interface EventListenerInfo {
+    element: HTMLElement;
+    event: string;
+    listener: EventListener;
+}
+
+export interface SWFPlayerConfig {
+    frameRate?: number;
+    enableSound?: boolean;
+    enableInteractivity?: boolean;
+    maxTextureSize?: number;
+    backgroundColor?: string;
+}
+
+export interface SWFPlayerEventMap {
+    'play': void;
+    'pause': void;
+    'stop': void;
+    'frameChange': { frame: number; totalFrames: number };
+    'loadProgress': { loaded: number; total: number };
+    'loadComplete': void;
+    'error': Error;
+}
+
+export type SWFPlayerEvent = keyof SWFPlayerEventMap;
+
 export class SWFPlayer {
-    private canvas: HTMLCanvasElement;
-    private renderer: WebGLRenderer;
-    private timeline: Timeline = new Timeline();
+    private readonly canvas: HTMLCanvasElement;
+    private readonly renderer: WebGLRenderer;
+    private readonly timeline: Timeline;
+    private readonly tagHandlers: TagHandlerRegistry;
+    private readonly resourceCache: Map<number, SWFResource> = new Map();
+    private readonly interactiveObjects: Map<number, InteractiveObject> = new Map();
+    private readonly eventListeners: EventListenerInfo[] = [];
+    private readonly playerEventListeners: Map<SWFPlayerEvent, Set<Function>> = new Map();
+    
     private isPlaying: boolean = false;
-    private frameRate: number = 12; // PERFORMANCE: Default 12fps might be too low for smooth animations
+    private frameRate: number = 30;
     private animationId: number | null = null;
     private lastFrameTime: number = 0;
-    private tagHandlers: TagHandlerRegistry = new TagHandlerRegistry();
-    private resourceCache: Map<number, any> = new Map(); // TYPE SAFETY: any should be specific resource types
-    private interactiveObjects: Map<number, InteractiveObject> = new Map();
-    private soundHandler: SoundHandler;
-    private spriteHandler: SpriteHandler;
-    private actionScriptHandler: ActionScriptHandler;
-    private shapeHandler: ShapeTagHandler;
-    private buttonHandler: ButtonHandler;
-    private filterHandler: FilterHandler;
-    private morphShapeHandler: MorphShapeHandler;
-    private eventListeners: Array<{ element: HTMLElement; event: string; listener: EventListener }> = [];
+    private loadingProgress: number = 0;
     private isDestroyed: boolean = false;
-    private loadingProgress: number = 0; // MISSING: Progress tracking implementation incomplete
+    
+    // Performance optimization: reuse frame objects
+    private framePool: Frame[] = [];
+    
+    // Handlers
+    private readonly soundHandler: SoundHandler;
+    private readonly spriteHandler: SpriteHandler;
+    private readonly actionScriptHandler: ActionScriptHandler;
+    private readonly shapeHandler: ShapeTagHandler;
+    private readonly buttonHandler: ButtonHandler;
+    private readonly filterHandler: FilterHandler;
+    private readonly morphShapeHandler: MorphShapeHandler;
+    
+    // Input state
+    private mousePosition: { x: number; y: number } = { x: 0, y: 0 };
+    private pressedKeys: Set<string> = new Set();
+    private activeTouches: Map<number, { x: number; y: number }> = new Map();
 
-    constructor(canvas: HTMLCanvasElement) {
+    constructor(canvas: HTMLCanvasElement, config: SWFPlayerConfig = {}) {
         if (!canvas) {
             throw new Error('Canvas element is required');
         }
+        
         this.canvas = canvas;
-        this.renderer = new WebGLRenderer(canvas, 2048);
+        this.frameRate = config.frameRate ?? 30;
+        
+        this.renderer = new WebGLRenderer(canvas, config.maxTextureSize ?? 2048);
+        this.timeline = new Timeline();
+        this.tagHandlers = new TagHandlerRegistry();
+        
+        // Initialize handlers
         this.soundHandler = new SoundHandler();
         this.spriteHandler = new SpriteHandler();
         this.actionScriptHandler = new ActionScriptHandler();
@@ -59,12 +139,12 @@ export class SWFPlayer {
         this.buttonHandler = new ButtonHandler();
         this.filterHandler = new FilterHandler();
         this.morphShapeHandler = new MorphShapeHandler();
+        
         this.initTagHandlers();
         this.setupInteractivity();
     }
 
     private initTagHandlers() {
-        this.tagHandlers = new TagHandlerRegistry();
         
         // Register core handlers
         this.tagHandlers.register([
@@ -120,23 +200,52 @@ export class SWFPlayer {
     }
 
     private setupInteractivity() {
+        // Mouse events
         const mouseDownListener = (event: Event) => this.handleMouseDown(event as MouseEvent);
         const mouseUpListener = (event: Event) => this.handleMouseUp(event as MouseEvent);
         const mouseMoveListener = (event: Event) => this.handleMouseMove(event as MouseEvent);
+        const contextMenuListener = (event: Event) => {
+            event.preventDefault(); // Prevent right-click context menu
+            return false;
+        };
 
         this.canvas.addEventListener('mousedown', mouseDownListener);
         this.canvas.addEventListener('mouseup', mouseUpListener);
         this.canvas.addEventListener('mousemove', mouseMoveListener);
+        this.canvas.addEventListener('contextmenu', contextMenuListener);
 
-        // MISSING: Touch event support for mobile devices
-        // MISSING: Keyboard event support for interactive elements
-        // MISSING: Context menu prevention for right-click
-        
+        // Touch events for mobile devices
+        const touchStartListener = (event: Event) => this.handleTouchStart(event as TouchEvent);
+        const touchEndListener = (event: Event) => this.handleTouchEnd(event as TouchEvent);
+        const touchMoveListener = (event: Event) => this.handleTouchMove(event as TouchEvent);
+        const touchCancelListener = (event: Event) => this.handleTouchCancel(event as TouchEvent);
+
+        this.canvas.addEventListener('touchstart', touchStartListener, { passive: false });
+        this.canvas.addEventListener('touchend', touchEndListener, { passive: false });
+        this.canvas.addEventListener('touchmove', touchMoveListener, { passive: false });
+        this.canvas.addEventListener('touchcancel', touchCancelListener, { passive: false });
+
+        // Keyboard events for interactive elements
+        const keyDownListener = (event: Event) => this.handleKeyDown(event as KeyboardEvent);
+        const keyUpListener = (event: Event) => this.handleKeyUp(event as KeyboardEvent);
+
+        // Make canvas focusable for keyboard events
+        this.canvas.tabIndex = 0;
+        this.canvas.addEventListener('keydown', keyDownListener);
+        this.canvas.addEventListener('keyup', keyUpListener);
+
         // Store references for cleanup
         this.eventListeners.push(
             { element: this.canvas, event: 'mousedown', listener: mouseDownListener },
             { element: this.canvas, event: 'mouseup', listener: mouseUpListener },
-            { element: this.canvas, event: 'mousemove', listener: mouseMoveListener }
+            { element: this.canvas, event: 'mousemove', listener: mouseMoveListener },
+            { element: this.canvas, event: 'contextmenu', listener: contextMenuListener },
+            { element: this.canvas, event: 'touchstart', listener: touchStartListener },
+            { element: this.canvas, event: 'touchend', listener: touchEndListener },
+            { element: this.canvas, event: 'touchmove', listener: touchMoveListener },
+            { element: this.canvas, event: 'touchcancel', listener: touchCancelListener },
+            { element: this.canvas, event: 'keydown', listener: keyDownListener },
+            { element: this.canvas, event: 'keyup', listener: keyUpListener }
         );
     }
 
@@ -170,15 +279,151 @@ export class SWFPlayer {
     }
 
     private handleMouseDown(event: MouseEvent) {
+        this.mousePosition = this.getCanvasPosition(event);
         this.handleMouseEvent(event, 'down');
     }
 
     private handleMouseUp(event: MouseEvent) {
+        this.mousePosition = this.getCanvasPosition(event);
         this.handleMouseEvent(event, 'up');
     }
 
     private handleMouseMove(event: MouseEvent) {
+        this.mousePosition = this.getCanvasPosition(event);
         this.handleMouseEvent(event, 'move');
+    }
+
+    // Touch event handlers
+    private handleTouchStart(event: TouchEvent) {
+        event.preventDefault(); // Prevent mouse events from firing
+        for (let i = 0; i < event.changedTouches.length; i++) {
+            const touch = event.changedTouches[i];
+            const pos = this.getTouchPosition(touch);
+            this.activeTouches.set(touch.identifier, pos);
+            
+            // Simulate mouse down for first touch
+            if (this.activeTouches.size === 1) {
+                this.mousePosition = pos;
+                this.handleTouchEvent(touch, 'down');
+            }
+        }
+    }
+
+    private handleTouchEnd(event: TouchEvent) {
+        event.preventDefault();
+        for (let i = 0; i < event.changedTouches.length; i++) {
+            const touch = event.changedTouches[i];
+            const pos = this.getTouchPosition(touch);
+            this.activeTouches.delete(touch.identifier);
+            
+            // Simulate mouse up for primary touch
+            if (this.activeTouches.size === 0) {
+                this.mousePosition = pos;
+                this.handleTouchEvent(touch, 'up');
+            }
+        }
+    }
+
+    private handleTouchMove(event: TouchEvent) {
+        event.preventDefault();
+        for (let i = 0; i < event.changedTouches.length; i++) {
+            const touch = event.changedTouches[i];
+            const pos = this.getTouchPosition(touch);
+            this.activeTouches.set(touch.identifier, pos);
+            
+            // Update mouse position for primary touch
+            if (touch.identifier === Array.from(this.activeTouches.keys())[0]) {
+                this.mousePosition = pos;
+                this.handleTouchEvent(touch, 'move');
+            }
+        }
+    }
+
+    private handleTouchCancel(event: TouchEvent) {
+        event.preventDefault();
+        this.activeTouches.clear();
+    }
+
+    // Keyboard event handlers
+    private handleKeyDown(event: KeyboardEvent) {
+        const key = event.code || event.key;
+        if (!this.pressedKeys.has(key)) {
+            this.pressedKeys.add(key);
+            this.handleKeyboardEvent(key, true);
+        }
+    }
+
+    private handleKeyUp(event: KeyboardEvent) {
+        const key = event.code || event.key;
+        this.pressedKeys.delete(key);
+        this.handleKeyboardEvent(key, false);
+    }
+
+    private getTouchPosition(touch: Touch): { x: number; y: number } {
+        const rect = this.canvas.getBoundingClientRect();
+        const scaleX = this.canvas.width / rect.width;
+        const scaleY = this.canvas.height / rect.height;
+        
+        return {
+            x: (touch.clientX - rect.left) * scaleX,
+            y: (touch.clientY - rect.top) * scaleY
+        };
+    }
+
+    private handleTouchEvent(touch: Touch, eventType: 'down' | 'up' | 'move') {
+        if (this.isDestroyed) return;
+        
+        const pos = this.getTouchPosition(touch);
+        
+        // Create a TouchList-like object
+        const touchList = {
+            length: 1,
+            item: (index: number) => index === 0 ? touch : null,
+            [0]: touch
+        } as unknown as TouchList;
+        
+        for (const [id, obj] of this.interactiveObjects) {
+            const isHit = this.hitTest(pos, obj);
+            
+            switch (eventType) {
+                case 'down':
+                    if (isHit) {
+                        obj.handleTouchStart?.(touchList);
+                        obj.handleMouseDown?.(); // Fallback to mouse handler
+                        obj.isPressed = true;
+                    }
+                    break;
+                case 'up':
+                    if (obj.isPressed) {
+                        obj.handleTouchEnd?.(touchList);
+                        obj.handleMouseUp?.(); // Fallback to mouse handler
+                        obj.isPressed = false;
+                    }
+                    break;
+                case 'move':
+                    if (isHit && !obj.isOver) {
+                        obj.handleMouseOver?.();
+                        obj.isOver = true;
+                    } else if (!isHit && obj.isOver) {
+                        obj.handleMouseOut?.();
+                        obj.isOver = false;
+                    }
+                    break;
+            }
+        }
+    }
+
+    private handleKeyboardEvent(key: string, isPressed: boolean) {
+        if (this.isDestroyed) return;
+        
+        // Handle global keyboard events (could be extended for ActionScript)
+        // For now, just log for debugging
+        console.log(`Key ${key} ${isPressed ? 'pressed' : 'released'}`);
+        
+        // Trigger keyboard handlers on interactive objects if they support it
+        for (const [id, obj] of this.interactiveObjects) {
+            // Future: Add keyboard handler support to InteractiveObject interface
+        }
     }
 
     private getCanvasPosition(event: MouseEvent): { x: number; y: number } {
@@ -268,13 +513,14 @@ export class SWFPlayer {
     }
 
     private async buildTimeline(tags: TagData[]) {
-        let currentFrame: Frame = { actions: [] };
+        let currentFrame: Frame = this.getFrameFromPool();
         const displayList = new DisplayList();
         
         console.log('[Build Timeline] Processing', tags.length, 'tags');
         
-        // PERFORMANCE: Sequential processing - could parallelize non-dependent operations
-        // Process tags sequentially to avoid data corruption
+        const unhandledTags = new Set<number>();
+        
+        // Process tags sequentially to maintain dependencies
         for (let i = 0; i < tags.length; i++) {
             const tag = tags[i];
             
@@ -287,38 +533,52 @@ export class SWFPlayer {
             try {
                 const handler = this.tagHandlers.getHandler(tag.code);
                 if (handler) {
-                    // ASYNC ISSUE: No timeout or cancellation for long-running tag processing
                     await handler.handle(tag, currentFrame, displayList);
                     console.log(`[Build Timeline] Successfully processed ${this.getTagName(tag.code)} (${tag.code})`);
                 } else if (tag.code === SwfTagCode.ShowFrame) {
                     this.timeline.addFrame(currentFrame);
-                    currentFrame = { actions: [] }; // PERFORMANCE: Object creation every frame
+                    currentFrame = this.getFrameFromPool();
                     console.log('[Build Timeline] ShowFrame - frame added');
                 } else if (tag.code === SwfTagCode.End) {
                     if (currentFrame.actions.length > 0) {
                         this.timeline.addFrame(currentFrame);
+                    } else {
+                        this.returnFrameToPool(currentFrame);
                     }
                     console.log('[Build Timeline] End tag reached');
                     break; // Stop processing after End tag
                 } else {
-                    // MISSING: Track unhandled tags for debugging
-                    console.log(`[Build Timeline] No handler for tag ${this.getTagName(tag.code)} (${tag.code})`);
+                    if (!unhandledTags.has(tag.code)) {
+                        unhandledTags.add(tag.code);
+                        console.log(`[Build Timeline] No handler for tag ${this.getTagName(tag.code)} (${tag.code})`);
+                    }
                 }
             } catch (error) {
                 console.error(`Error processing tag ${this.getTagName(tag.code)} (${tag.code}):`, error);
                 // Continue processing other tags instead of failing completely
-                // MISSING: Error recovery strategy - corrupted timeline could render incorrectly
+                this.emit('error', error instanceof Error ? error : new Error(String(error)));
             }
         }
         
         // If we have actions but no frames, create a frame
         if (currentFrame.actions.length > 0) {
             this.timeline.addFrame(currentFrame);
+        } else {
+            // Return unused frame to pool
+            this.returnFrameToPool(currentFrame);
+        }
+        
+        if (unhandledTags.size > 0) {
+            console.warn(`[Build Timeline] ${unhandledTags.size} unhandled tag types:`, Array.from(unhandledTags).map(code => `${this.getTagName(code)}(${code})`));
         }
         
         console.log('[Build Timeline] Total frames:', this.timeline.getTotalFrames());
         console.log('[Build Timeline] Display list has', displayList.getObjects().length, 'objects');
-        // MISSING: Validation that timeline is in valid state
+        
+        // Validate timeline state
+        if (this.timeline.getTotalFrames() === 0) {
+            console.warn('[Build Timeline] No frames created - SWF may not display correctly');
+        }
     }
 
     private getTagName(code: number): string {
@@ -410,42 +670,104 @@ export class SWFPlayer {
         console.log('Canvas dimensions:', this.canvas.width, 'x', this.canvas.height);
     }
 
+    // Event system
+    addEventListener<T extends SWFPlayerEvent>(event: T, listener: (data: SWFPlayerEventMap[T]) => void): void {
+        if (!this.playerEventListeners.has(event)) {
+            this.playerEventListeners.set(event, new Set());
+        }
+        this.playerEventListeners.get(event)!.add(listener);
+    }
+
+    removeEventListener<T extends SWFPlayerEvent>(event: T, listener: (data: SWFPlayerEventMap[T]) => void): void {
+        const listeners = this.playerEventListeners.get(event);
+        if (listeners) {
+            listeners.delete(listener);
+        }
+    }
+
+    private emit<T extends SWFPlayerEvent>(event: T, data: SWFPlayerEventMap[T]): void {
+        const listeners = this.playerEventListeners.get(event);
+        if (listeners) {
+            listeners.forEach(listener => {
+                try {
+                    listener(data);
+                } catch (error) {
+                    console.error(`Error in ${event} event listener:`, error);
+                }
+            });
+        }
+    }
+
+    private getFrameFromPool(): Frame {
+        return this.framePool.pop() || { actions: [] };
+    }
+
+    private returnFrameToPool(frame: Frame): void {
+        frame.actions.length = 0; // Clear actions
+        if (this.framePool.length < 100) { // Limit pool size
+            this.framePool.push(frame);
+        }
+    }
+
     play() {
-        if (this.isPlaying) return; // MISSING: Should emit event for state change
+        if (this.isPlaying) {
+            return;
+        }
 
         this.isPlaying = true;
         this.lastFrameTime = performance.now();
         this.animate();
+        this.emit('play', undefined);
 
         console.log('Reprodução iniciada');
     }
 
     pause() {
+        if (!this.isPlaying) {
+            return;
+        }
+        
         this.isPlaying = false;
         if (this.animationId) {
             cancelAnimationFrame(this.animationId);
             this.animationId = null;
         }
-
+        
+        this.emit('pause', undefined);
         console.log('Reprodução pausada');
-        // MISSING: Should emit pause event
     }
 
     stop() {
         this.pause();
         this.timeline.gotoFrame(0);
         this.render();
-
+        
+        // Reset all interactive object states
+        for (const [id, obj] of this.interactiveObjects) {
+            if ('isOver' in obj) obj.isOver = false;
+            if ('isPressed' in obj) obj.isPressed = false;
+        }
+        
+        this.emit('stop', undefined);
         console.log('Reprodução parada');
-        // MISSING: Should emit stop event
-        // MISSING: Should reset all object states
     }
 
     gotoFrame(frameNumber: number) {
-        // MISSING: Input validation - frameNumber could be negative or out of bounds
-        this.timeline.gotoFrame(frameNumber);
-        this.render();
-        // MISSING: Should emit frame change event
+        const totalFrames = this.timeline.getTotalFrames();
+        
+        // Input validation
+        if (frameNumber < 0) {
+            frameNumber = 0;
+        } else if (frameNumber >= totalFrames) {
+            frameNumber = Math.max(0, totalFrames - 1);
+        }
+        
+        const currentFrame = this.timeline.getCurrentFrame();
+        if (currentFrame !== frameNumber) {
+            this.timeline.gotoFrame(frameNumber);
+            this.render();
+            this.emit('frameChange', { frame: frameNumber, totalFrames });
+        }
     }
 
     getCurrentFrame(): number {
@@ -461,8 +783,8 @@ export class SWFPlayer {
         // This method is for diagnostics only. It creates a simple test shape and renders it.
         console.log('Testing renderer with simple red square...');
         
-        // Clear any existing timeline
-        this.timeline = new Timeline();
+        // Reset timeline by going to frame 0
+        this.timeline.gotoFrame(0);
         
         this.createTestContent();
         this.timeline.gotoFrame(0);
@@ -596,7 +918,7 @@ export class SWFPlayer {
         this.eventListeners.forEach(({ element, event, listener }) => {
             element.removeEventListener(event, listener);
         });
-        this.eventListeners = [];
+        this.eventListeners.length = 0; // Clear array without reassigning
         
         // Clear caches
         this.resourceCache.clear();

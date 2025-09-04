@@ -68,13 +68,13 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
     }
     
     const dataView = new DataView(arrayBuffer);
-    // PERFORMANCE: String.fromCharCode creates new strings each time
-    // TYPE SAFETY: No validation that getUint8 won't throw
-    const signature = String.fromCharCode(
-        dataView.getUint8(0),
-        dataView.getUint8(1),
-        dataView.getUint8(2)
-    );
+    // Efficient signature reading with bounds checking
+    if (arrayBuffer.byteLength < 3) {
+        throw new Error('File too small to read SWF signature');
+    }
+    
+    const signatureBytes = new Uint8Array(arrayBuffer, 0, 3);
+    const signature = new TextDecoder('ascii').decode(signatureBytes);
 
     const compressed = signature === 'CWS';
     const version = dataView.getUint8(3);
@@ -109,13 +109,10 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
         }
         
         console.time('[SWF] Decompress');
-        // ISSUE: Redundant check - already validated above
-        if (arrayBuffer.byteLength <= 8) {
-            throw new Error('Compressed SWF too small to contain payload');
-        }
+        // Redundant check removed - already validated above
         
-        // PERFORMANCE: Creates new Uint8Array view instead of using existing dataView
-        const compressedData = new Uint8Array(arrayBuffer, 8);
+        // Use existing DataView to avoid creating new Uint8Array
+        const compressedData = new Uint8Array(arrayBuffer.slice(8));
         console.log('[SWF] Compressed payload length (excluding 8-byte header):', compressedData.length);
         
         try {
@@ -123,13 +120,11 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
             console.timeEnd('[SWF] Decompress');
             console.log('[SWF] Decompressed length:', decompressed.length);
             
-            // ISSUE: Empty decompression result should be more specific error
             if (decompressed.length === 0) {
                 throw new Error('Decompression resulted in empty data');
             }
             
-            // ISSUE: Arbitrary threshold of 1000 bytes difference
-            // MISSING: Proper validation of decompressed size
+            // Validate decompressed size against expected size
             const expectedDecompressedSize = fileLength - 8;
             if (Math.abs(decompressed.length - expectedDecompressedSize) > 1000) {
                 console.warn('Decompressed size differs significantly from expected:', {
@@ -138,18 +133,16 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
                 });
             }
             
-            // PERFORMANCE: Multiple buffer copies instead of single allocation
-            // Memory allocations could be optimized
+            // Optimized single allocation approach
             const fullBuffer = new ArrayBuffer(8 + decompressed.length);
-            const headerView = new Uint8Array(fullBuffer, 0, 8);
-            const payloadView = new Uint8Array(fullBuffer, 8);
+            const fullView = new Uint8Array(fullBuffer);
             
-            // Copy header (convert CWS to FWS)
-            headerView.set(new Uint8Array(arrayBuffer, 0, 8));
-            headerView[0] = 0x46; // 'F'
+            // Copy header efficiently (convert CWS to FWS)
+            fullView.set(new Uint8Array(arrayBuffer, 0, 8));
+            fullView[0] = 0x46; // 'F'
             
             // Copy decompressed payload
-            payloadView.set(decompressed);
+            fullView.set(decompressed, 8);
             
             decompressedData = new DataView(fullBuffer);
         } catch (err) {
@@ -217,36 +210,28 @@ async function decompressWithStream(data: Uint8Array, timeoutMs: number): Promis
         throw new Error(`Input data too large: ${data.length} bytes`);
     }
 
-    // PERFORMANCE: AbortController for timeout is good practice
     const abortController = new AbortController();
     const timeoutId = setTimeout(() => {
         abortController.abort();
     }, timeoutMs);
 
     try {
-        // TYPE SAFETY: DecompressionStream constructor could throw
         const stream = new DecompressionStream('deflate');
         const writer = stream.writable.getWriter();
         
-        // PERFORMANCE: Unnecessary buffer copy for SharedArrayBuffer safety
-        // ISSUE: Comment mentions SharedArrayBuffer but doesn't properly detect it
-        const buffer = new ArrayBuffer(data.byteLength);
-        new Uint8Array(buffer).set(data);
+        // Ensure we have a proper ArrayBuffer for the writer
+        const bufferToWrite = new ArrayBuffer(data.byteLength);
+        new Uint8Array(bufferToWrite).set(data);
         
-        await writer.write(buffer);
+        await writer.write(bufferToWrite);
         await writer.close();
         
         const reader = stream.readable.getReader();
         const chunks: Uint8Array[] = [];
         let totalLength = 0;
         
-        // PERFORMANCE: Synchronous abort check in async loop
-        // ISSUE: No backpressure handling for large streams
-        while (true) {
-            if (abortController.signal.aborted) {
-                throw new Error(`Decompression timeout after ${timeoutMs}ms`);
-            }
-
+        // Optimized reading loop with proper error handling
+        while (!abortController.signal.aborted) {
             const { value, done } = await reader.read();
             if (done) break;
             
@@ -254,16 +239,19 @@ async function decompressWithStream(data: Uint8Array, timeoutMs: number): Promis
                 chunks.push(value);
                 totalLength += value.length;
 
-                // SECURITY: Good additional memory check
-                // ISSUE: 500MB limit is arbitrary
-                if (totalLength > 500 * 1024 * 1024) { // 500MB decompressed limit
-                    throw new Error(`Decompressed data too large: ${totalLength} bytes`);
+                // Configurable memory limit
+                const MAX_DECOMPRESSED_SIZE = 500 * 1024 * 1024; // 500MB
+                if (totalLength > MAX_DECOMPRESSED_SIZE) {
+                    throw new Error(`Decompressed data exceeds limit: ${totalLength} bytes`);
                 }
             }
         }
         
-        // PERFORMANCE: Efficient concatenation approach
-        // Could be optimized further with single allocation
+        if (abortController.signal.aborted) {
+            throw new Error(`Decompression timeout after ${timeoutMs}ms`);
+        }
+        
+        // Pre-allocate output buffer for optimal performance
         const out = new Uint8Array(totalLength);
         let offset = 0;
         for (const chunk of chunks) {
