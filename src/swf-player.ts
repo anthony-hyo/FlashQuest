@@ -491,6 +491,13 @@ export class SWFPlayer {
 
             this.timeline.gotoFrame(0);
             this.render();
+            
+            // Force a second render after a small delay to ensure all data is properly loaded
+            // This addresses an issue where initial render may use cached/stale data
+            setTimeout(() => {
+                console.log('[SWF] Performing delayed refresh render to ensure correct colors');
+                this.render();
+            }, 50);
 
         } catch (error) {
             this.loadingProgress = 0;

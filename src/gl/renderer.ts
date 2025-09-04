@@ -818,17 +818,56 @@ export class WebGLRenderer {
     }
 
     private renderOutline(obj: RenderObject) {
+        console.log(`[renderOutline] Called with obj.shape:`, obj.shape ? 'exists' : 'null');
         if (!obj.shape) return; // Add null check
         
         const shape = ('startShape' in obj.shape) ? obj.shape.startShape : obj.shape;
-        if (!shape || !shape.lineStyles || shape.lineStyles.length === 0) return;
-        const path = this.getOutlinePath(shape);
-        if (path.length < 4) return;
+        console.log(`[renderOutline] Shape:`, shape ? 'exists' : 'null');
+        console.log(`[renderOutline] Line styles:`, shape?.lineStyles ? `${shape.lineStyles.length} styles` : 'none');
+        
+        if (!shape || !shape.lineStyles || shape.lineStyles.length === 0) {
+            console.log(`[renderOutline] Skipping - no line styles`);
+            return;
+        }
 
-        // Use first line style for now
-        const ls = shape.lineStyles[0];
+        // Find which line style is actually being used in the shape records
+        let activeLineStyle = 0;
+        for (const record of shape.records || []) {
+            if (record.type === 'styleChange' && record.lineStyle !== undefined) {
+                activeLineStyle = record.lineStyle;
+                console.log(`[renderOutline] Found active line style: ${activeLineStyle}`);
+                break; // Use the first line style we find
+            }
+        }
+
+        // If no line style found in records, use the first one
+        if (activeLineStyle === 0 && shape.lineStyles.length > 0) {
+            activeLineStyle = 1; // SWF uses 1-based indexing
+            console.log(`[renderOutline] No line style in records, defaulting to line style 1`);
+        }
+
+        // Convert to 0-based index for array access
+        let lineStyleIndex = Math.max(0, activeLineStyle - 1);
+        if (lineStyleIndex >= shape.lineStyles.length) {
+            console.log(`[renderOutline] Line style ${activeLineStyle} out of range (max: ${shape.lineStyles.length}), using first style`);
+            lineStyleIndex = 0;
+        }
+
+        const path = this.getOutlinePath(shape);
+        console.log(`[renderOutline] Path length:`, path.length);
+        if (path.length < 4) {
+            console.log(`[renderOutline] Skipping - path too short (${path.length} < 4)`);
+            return;
+        }
+
+        // Use the correct line style based on shape records
+        const ls = shape.lineStyles[lineStyleIndex];
         const widthPx = (ls.width || 20) / TWIPS_PER_PIXEL; // width is twips
         const col = this.applyColorTransform(ls.color || { r: 0, g: 0, b: 0, a: 1 }, obj.colorTransform);
+
+        console.log(`[renderOutline] Using line style ${activeLineStyle} (index ${lineStyleIndex})`);
+        console.log(`[renderOutline] Line style color: R=${Math.round(col.r * 255)}, G=${Math.round(col.g * 255)}, B=${Math.round(col.b * 255)}, A=${col.a.toFixed(2)}`);
+        console.log(`[renderOutline] Line width: ${widthPx}px`);
 
         // Build thin quads along path segments as a simple stroke emulation
         // For simplicity, render as GL_LINES using the color attribute (no width), approximating outline.
@@ -1374,6 +1413,7 @@ export class WebGLRenderer {
         const path: number[] = [];
         let currentX = 0, currentY = 0;
         let started = false;
+        
         for (const record of (shape as Shape).records) {
             if (record.type === 'styleChange' && record.moveTo) {
                 currentX = record.moveTo.x; currentY = record.moveTo.y;
@@ -1390,6 +1430,20 @@ export class WebGLRenderer {
                 else { path.push(currentX / TWIPS_PER_PIXEL, currentY / TWIPS_PER_PIXEL); }
             }
         }
+        
+        // If no path found but we have bounds, create outline from bounds
+        if (path.length === 0 && (shape as Shape).bounds) {
+            const b = (shape as Shape).bounds;
+            const x0 = b.xMin / TWIPS_PER_PIXEL;
+            const y0 = b.yMin / TWIPS_PER_PIXEL;
+            const x1 = b.xMax / TWIPS_PER_PIXEL;
+            const y1 = b.yMax / TWIPS_PER_PIXEL;
+            
+            // Create rectangle outline path (clockwise)
+            path.push(x0, y0,  x1, y0,  x1, y1,  x0, y1,  x0, y0); // Close the rectangle
+            console.log(`[getOutlinePath] Generated bounds outline path: ${path.length/2} points`);
+        }
+        
         return path;
     }
 
@@ -1579,13 +1633,22 @@ export class WebGLRenderer {
             return { vertices: [], indices: [], colors: [] };
         }
 
-    // Assign color (use active fill style if available, else first, else white)
+    // Assign color using the proper active fill style detection
     let color = { r: 1, g: 1, b: 1, a: 1 } as Color;
-    const fillStyles = (shape as Shape).fillStyles || [];
-    const picked = (chosenFillIndex !== undefined && fillStyles[chosenFillIndex]) ? fillStyles[chosenFillIndex] : fillStyles[0];
     
-    if (picked?.color) {
-        color = picked.color;
+    if ('fillStyles' in shape && shape.fillStyles) {
+        // Use the getActiveFillStyle method to properly determine active fill
+        const activeFillStyle = this.getActiveFillStyle(shape as Shape);
+        if (activeFillStyle?.color) {
+            color = activeFillStyle.color;
+            console.log(`[triangulateShape] Using active fill style color:`, color);
+        } else if (shape.fillStyles.length > 0 && shape.fillStyles[0]?.color) {
+            // Fallback to first fill style
+            color = shape.fillStyles[0].color;
+            console.log(`[triangulateShape] Using first fill style color:`, color);
+        } else {
+            console.warn(`[triangulateShape] No valid color found in fill styles, using white`);
+        }
     }
         const colors: number[] = [];
         for (let i = 0; i < path.length / 2; i++) {
