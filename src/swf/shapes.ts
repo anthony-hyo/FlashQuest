@@ -1,5 +1,5 @@
-import { Bytes, Matrix, ColorTransform } from '../utils/bytes';
-import { SwfHeader, SwfTag, SwfTagCode } from '../tags/tags';
+import { Bytes, Matrix } from '../utils/bytes';
+import { SwfTagCode } from '../tags/tags';
 
 export interface Color {
     r: number;
@@ -80,13 +80,13 @@ export function parseShape(data: Bytes, shapeVersion: number): Shape {
 
     // Para DefineShape4, ler edge bounds e use fill winding rule
     if (shapeVersion === SwfTagCode.DefineShape4) {
-        const edgeBounds = data.readRect();
-        const usesFillWindingRule = data.readUint8() & 0x01;
+        data.readRect(); // edgeBounds (unused)
+        data.readUint8(); // usesFillWindingRule (unused)
     }
 
     const fillStyles = parseFillStyles(data, shapeVersion);
     const lineStyles = parseLineStyles(data, shapeVersion);
-    const records = parseShapeRecords(data, fillStyles.length, lineStyles.length);
+    const records = parseShapeRecords(data);
 
     return {
         bounds,
@@ -98,34 +98,77 @@ export function parseShape(data: Bytes, shapeVersion: number): Shape {
 
 function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
     const fillStyles: FillStyle[] = [];
+    
+    // Check if we have enough data to read the fill style count
+    if (data.eof) {
+        console.warn('[SWF] No data available for fill styles');
+        return fillStyles;
+    }
+    
     let fillStyleCount = data.readUint8();
 
     if (fillStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
+        if (data.remaining < 2) {
+            console.warn('[SWF] Insufficient data for extended fill style count');
+            return fillStyles;
+        }
         fillStyleCount = data.readUint16();
     }
 
     for (let i = 0; i < fillStyleCount; i++) {
+        if (data.eof) {
+            console.warn(`[SWF] No data available for fill style ${i + 1}/${fillStyleCount}`);
+            break;
+        }
+        
         const fillType = data.readUint8();
         const fillStyle: FillStyle = { type: fillType };
 
         switch (fillType) {
             case 0x00: // Solid fill
-                fillStyle.color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
+                const colorBytes = shapeVersion >= SwfTagCode.DefineShape3 ? 4 : 3;
+                if (data.remaining < colorBytes) {
+                    console.warn(`[SWF] Insufficient data for solid fill color in fill style ${i + 1}`);
+                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Magenta for debug
+                } else {
+                    fillStyle.color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
+                }
                 break;
 
             case 0x10: // Linear gradient
             case 0x12: // Radial gradient
             case 0x13: // Focal radial gradient (SWF 8+)
-                fillStyle.bitmapMatrix = data.readMatrix();
-                fillStyle.gradient = parseGradient(data, fillType, shapeVersion);
+                // Check if we have enough data for matrix and gradient
+                if (data.remaining < 10) { // Rough estimate for minimum matrix + gradient data
+                    console.warn(`[SWF] Insufficient data for gradient fill in fill style ${i + 1}`);
+                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
+                    break;
+                }
+                try {
+                    fillStyle.bitmapMatrix = data.readMatrix();
+                    fillStyle.gradient = parseGradient(data, fillType, shapeVersion);
+                } catch (error) {
+                    console.warn(`[SWF] Error parsing gradient in fill style ${i + 1}:`, error);
+                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
+                }
                 break;
 
             case 0x40: // Repeating bitmap
             case 0x41: // Clipped bitmap
             case 0x42: // Non-smoothed repeating bitmap
             case 0x43: // Non-smoothed clipped bitmap
-                fillStyle.bitmapId = data.readUint16();
-                fillStyle.bitmapMatrix = data.readMatrix();
+                if (data.remaining < 12) { // 2 bytes for bitmap ID + minimum matrix data
+                    console.warn(`[SWF] Insufficient data for bitmap fill in fill style ${i + 1}`);
+                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
+                    break;
+                }
+                try {
+                    fillStyle.bitmapId = data.readUint16();
+                    fillStyle.bitmapMatrix = data.readMatrix();
+                } catch (error) {
+                    console.warn(`[SWF] Error parsing bitmap fill in fill style ${i + 1}:`, error);
+                    fillStyle.color = { r: 1, g: 0, b: 1, a: 1 }; // Fallback to magenta
+                }
                 break;
 
             default:
@@ -142,16 +185,40 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
 
 function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     const lineStyles: LineStyle[] = [];
+    
+    // Check if we have enough data to read the line style count
+    if (data.eof) {
+        console.warn('[SWF] No data available for line styles');
+        return lineStyles;
+    }
+    
     let lineStyleCount = data.readUint8();
 
     if (lineStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
+        if (data.remaining < 2) {
+            console.warn('[SWF] Insufficient data for extended line style count');
+            return lineStyles;
+        }
         lineStyleCount = data.readUint16();
     }
 
     for (let i = 0; i < lineStyleCount; i++) {
+        // Check if we have enough data for width
+        if (data.remaining < 2) {
+            console.warn(`[SWF] Insufficient data for line style ${i + 1}/${lineStyleCount}`);
+            break;
+        }
+        
         const width = data.readUint16();
 
         if (shapeVersion === SwfTagCode.DefineShape4) {
+            // Check if we have enough data for LineStyle2 structure
+            // We need at least 2 bytes for the flags and cap styles
+            if (data.remaining < 2) {
+                console.warn(`[SWF] Insufficient data for LineStyle2 ${i + 1}/${lineStyleCount}`);
+                break;
+            }
+            
             // LineStyle2 para DefineShape4
             const startCapStyle = data.readUnsignedBits(2);
             const joinStyle = data.readUnsignedBits(2);
@@ -165,17 +232,33 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
 
             let miterLimitFactor;
             if (joinStyle === 2) {
+                if (data.remaining < 2) {
+                    console.warn(`[SWF] Insufficient data for miter limit factor in line style ${i + 1}`);
+                    break;
+                }
                 miterLimitFactor = data.readFixed8();
             }
 
             let color: Color;
-            let fillType: FillStyle | undefined;
+            let fillType: FillStyle | undefined = undefined;
 
             if (hasFillFlag) {
-                fillType = parseFillStyles(data, shapeVersion)[0];
-                color = fillType.color || { r: 0, g: 0, b: 0, a: 1 };
+                // Check if we have enough data for fill styles
+                if (data.eof) {
+                    console.warn(`[SWF] No data available for fill styles in line style ${i + 1}`);
+                    color = { r: 0, g: 0, b: 0, a: 1 };
+                } else {
+                    const fillStyles = parseFillStyles(data, shapeVersion);
+                    fillType = fillStyles.length > 0 ? fillStyles[0] : undefined;
+                    color = (fillType && fillType.color) ? fillType.color : { r: 0, g: 0, b: 0, a: 1 };
+                }
             } else {
-                color = readColor(data, true);
+                if (data.remaining < 4) {
+                    console.warn(`[SWF] Insufficient data for color in line style ${i + 1}`);
+                    color = { r: 0, g: 0, b: 0, a: 1 };
+                } else {
+                    color = readColor(data, true);
+                }
             }
 
             lineStyles.push({
@@ -193,6 +276,13 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
                 fillType
             });
         } else {
+            // Check if we have enough data for color
+            const colorBytes = shapeVersion >= SwfTagCode.DefineShape3 ? 4 : 3;
+            if (data.remaining < colorBytes) {
+                console.warn(`[SWF] Insufficient data for color in line style ${i + 1}`);
+                break;
+            }
+            
             const color = readColor(data, shapeVersion >= SwfTagCode.DefineShape3);
             lineStyles.push({ width, color });
         }
@@ -227,7 +317,7 @@ function parseGradient(data: Bytes, gradientType: number, shapeVersion: number):
     };
 }
 
-function parseShapeRecords(data: Bytes, numFillStyles: number, numLineStyles: number): ShapeRecord[] {
+function parseShapeRecords(data: Bytes): ShapeRecord[] {
     const records: ShapeRecord[] = [];
 
     data.align();

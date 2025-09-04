@@ -34,16 +34,16 @@ export class Bytes {
     position: number = 0;
 
     constructor(buffer: ArrayBuffer | ArrayBufferLike) {
-        // Check if SharedArrayBuffer exists in the global scope before using it
-        const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
-        
-        // If SharedArrayBuffer exists and the buffer is an instance of it
-        if (hasSharedArrayBuffer && (typeof SharedArrayBuffer === 'function') && buffer instanceof SharedArrayBuffer) {
+        // Safely check for SharedArrayBuffer without causing ReferenceError
+        const hasSharedArrayBuffer = typeof window !== 'undefined' && 'SharedArrayBuffer' in window;
+        if (hasSharedArrayBuffer && buffer instanceof window.SharedArrayBuffer) {
+            // Convert SharedArrayBuffer to ArrayBuffer for compatibility
             const temp = new ArrayBuffer(buffer.byteLength);
             new Uint8Array(temp).set(new Uint8Array(buffer));
             this.view = new DataView(temp);
         } else {
-            this.view = new DataView(buffer);
+            // Handle regular ArrayBuffer or when SharedArrayBuffer is not available
+            this.view = new DataView(buffer as ArrayBuffer);
         }
     }
 
@@ -169,6 +169,10 @@ export class Bytes {
 
     readBit(): number {
         if (this.bitPosition === 8) {
+            if (this.position >= this.view.byteLength) {
+                // Return 0 instead of throwing error to handle gracefully
+                return 0;
+            }
             this.bitBuffer = this.readUint8();
             this.bitPosition = 0;
         }

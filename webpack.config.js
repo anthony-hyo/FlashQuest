@@ -48,7 +48,11 @@ module.exports = (env, argv) => {
 			host: '0.0.0.0',
 			hot: true,
 			open: true,
-			historyApiFallback: true
+			historyApiFallback: true,
+			headers: {
+				'Cross-Origin-Embedder-Policy': 'require-corp',
+				'Cross-Origin-Opener-Policy': 'same-origin'
+			}
 		},
 		optimization: {
 			splitChunks: isProduction ? {
