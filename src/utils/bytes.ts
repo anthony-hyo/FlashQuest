@@ -30,10 +30,11 @@ export interface ColorTransform {
 export class Bytes {
     private view: DataView;
     private bitBuffer: number = 0;
-    private bitPosition: number = 8;
-    position: number = 0;
+    private bitPosition: number = 8; // BUG: Should be 0 initially, 8 means we start with no bits available
+    position: number = 0; // TYPE SAFETY: Should be private with getter/setter for validation
 
     constructor(buffer: ArrayBuffer | ArrayBufferLike) {
+        // UNNECESSARY COMPLEXITY: SharedArrayBuffer handling adds complexity for little benefit
         // Safely check for SharedArrayBuffer without causing ReferenceError
         const hasSharedArrayBuffer = typeof window !== 'undefined' && 'SharedArrayBuffer' in window;
         if (hasSharedArrayBuffer && buffer instanceof window.SharedArrayBuffer) {
@@ -45,6 +46,7 @@ export class Bytes {
             // Handle regular ArrayBuffer or when SharedArrayBuffer is not available
             this.view = new DataView(buffer as ArrayBuffer);
         }
+        // MISSING: Input validation - buffer could be null or zero-length
     }
 
     get remaining(): number {
@@ -61,6 +63,7 @@ export class Bytes {
 
     readUint8(): number {
         this.bitPosition = 8; // Reset bit position when reading bytes
+        // MISSING: More descriptive error message with position info
         if (this.position >= this.view.byteLength) {
             throw new Error('Unexpected end of data');
         }
@@ -69,16 +72,18 @@ export class Bytes {
 
     readUint16(): number {
         this.bitPosition = 8;
+        // BUG: Off-by-one error - should check position + 1 < byteLength, not >=
         if (this.position + 1 >= this.view.byteLength) {
             throw new Error('Unexpected end of data');
         }
-        const value = this.view.getUint16(this.position, true);
+        const value = this.view.getUint16(this.position, true); // ENDIANNESS: Always little-endian, should be configurable
         this.position += 2;
         return value;
     }
 
     readInt16(): number {
         this.bitPosition = 8;
+        // BUG: Same off-by-one error as readUint16
         if (this.position + 1 >= this.view.byteLength) {
             throw new Error('Unexpected end of data');
         }
@@ -89,6 +94,7 @@ export class Bytes {
 
     readUint32(): number {
         this.bitPosition = 8;
+        // BUG: Same off-by-one error - should check position + 3 < byteLength
         if (this.position + 3 >= this.view.byteLength) {
             throw new Error('Unexpected end of data');
         }

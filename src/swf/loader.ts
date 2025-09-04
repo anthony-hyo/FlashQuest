@@ -7,21 +7,28 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
 
     if (typeof source === 'string') {
         console.time('[SWF] Fetch');
+        // MISSING: URL validation and security checks
         const response = await fetch(source);
         if (!response.ok) {
             throw new Error(`Falha ao carregar SWF: ${response.statusText}`);
         }
+        // MISSING: Content-Type validation
+        // MISSING: Content-Length checks for very large files
         arrayBuffer = await response.arrayBuffer();
         console.timeEnd('[SWF] Fetch');
     } else {
         console.time('[SWF] File->ArrayBuffer');
+        // MISSING: File size validation before loading into memory
+        // SECURITY: No file type validation beyond extension
         arrayBuffer = await source.arrayBuffer();
         console.timeEnd('[SWF] File->ArrayBuffer');
     }
 
     console.log('[SWF] Raw size bytes:', arrayBuffer.byteLength);
+    // MISSING: Buffer size validation - could exhaust memory
     const dataView = new DataView(arrayBuffer);
 
+    // MISSING: Buffer length check before reading header
     const signature = String.fromCharCode(
         dataView.getUint8(0),
         dataView.getUint8(1),
@@ -34,25 +41,33 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
 
     console.log('[SWF] Header:', { signature, compressed, version, declaredLength: fileLength });
 
+    // MISSING: Support for ZWS (LZMA compressed) format
     if (signature !== 'FWS' && signature !== 'CWS') {
         throw new Error('Arquivo não é um SWF válido');
     }
+
+    // MISSING: Version validation - very old/new versions may not be supported
+    // MISSING: File length validation against actual buffer size
 
     let decompressedData: DataView;
 
     if (compressed) {
         console.time('[SWF] Decompress');
+        // BUG: No validation that buffer has enough data for 8-byte header
         const compressedData = new Uint8Array(arrayBuffer, 8);
         console.log('[SWF] Compressed payload length (excluding 8-byte header):', compressedData.length);
         try {
             const decompressed = await decompressZlib(compressedData);
             console.timeEnd('[SWF] Decompress');
             console.log('[SWF] Decompressed length:', decompressed.length);
+            // BUG: This check is incorrect - should compare with declared file length
             if (decompressed.length === compressedData.length) {
                 console.warn('[SWF] Decompressed size equals compressed size - possibly failed decompression');
             }
+            // MEMORY ISSUE: Creating large buffers without cleanup on error
             const fullBuffer = new ArrayBuffer(8 + decompressed.length);
             const fullView = new DataView(fullBuffer);
+            // PERFORMANCE: Byte-by-byte copy is inefficient
             for (let i = 0; i < 8; i++) fullView.setUint8(i, dataView.getUint8(i));
             fullView.setUint8(0, 0x46); // 'F'
             new Uint8Array(fullBuffer).set(decompressed, 8);
@@ -60,6 +75,7 @@ export async function loadSwf(source: string | File): Promise<{ header: SWFFileH
         } catch (err) {
             console.timeEnd('[SWF] Decompress');
             console.error('[SWF] Decompress failed, aborting with raw data (likely to fail later):', err);
+            // BUG: Using compressed data when decompression fails will cause parsing errors
             decompressedData = dataView;
         }
     } else {
@@ -85,9 +101,11 @@ async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
     }
 
     // 2. Try native DecompressionStream with timeout safeguard
+    // BROWSER COMPATIBILITY: DecompressionStream not available in all browsers
     if (typeof DecompressionStream !== 'undefined') {
         try {
             console.time('[SWF] DecompressionStream');
+            // MAGIC NUMBER: 8000ms timeout is arbitrary
             const result = await decompressWithStream(compressedData, 8000);
             console.timeEnd('[SWF] DecompressionStream');
             return result;
@@ -97,6 +115,7 @@ async function decompressZlib(compressedData: Uint8Array): Promise<Uint8Array> {
     }
 
     // 3. Fallback very naive
+    // BAD PRACTICE: "Less reliable" fallback should not be used in production
     console.warn('[SWF] Usando fallback inflate simples (menos confiável)');
     return inflateSimple(compressedData);
 }

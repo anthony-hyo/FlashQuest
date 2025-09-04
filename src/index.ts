@@ -17,12 +17,16 @@ class SWFRenderer {
     private controls: HTMLElement | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
+        // MISSING: Input validation - canvas could be null
+        // MISSING: Check if canvas is already in use by another instance
         this.canvas = canvas;
         this.player = new SWFPlayer(canvas);
         this.setupCanvas();
     }
 
     private setupCanvas() {
+        // ACCESSIBILITY ISSUE: Hard-coded styles override user/page styles
+        // MAINTAINABILITY: CSS should be in separate files, not inline
         this.canvas.style.border = '1px solid #ccc';
         this.canvas.style.display = 'block';
         this.canvas.style.margin = '0 auto';
@@ -33,6 +37,7 @@ class SWFRenderer {
             await this.player.loadSWF(source);
             this.createControls();
         } catch (error) {
+            // BUG: Error is logged and re-thrown, causing double error reporting in some contexts
             console.error('Erro ao carregar SWF:', error);
             throw error;
         }
@@ -40,10 +45,12 @@ class SWFRenderer {
 
     private createControls() {
         if (this.controls) {
-            this.controls.remove();
+            this.controls.remove(); // MEMORY LEAK: Event listeners not properly cleaned up
         }
 
         this.controls = document.createElement('div');
+        // MAINTAINABILITY: Massive inline CSS string is hard to maintain
+        // ACCESSIBILITY: No ARIA labels or keyboard navigation support
         this.controls.style.cssText = `
             display: flex;
             justify-content: center;
@@ -59,6 +66,7 @@ class SWFRenderer {
         // Botão Play/Pause
         const playButton = document.createElement('button');
         playButton.textContent = '▶️ Play';
+        // MAINTAINABILITY: Duplicate CSS strings
         playButton.style.cssText = `
             padding: 8px 16px;
             border: none;
@@ -69,7 +77,7 @@ class SWFRenderer {
             font-size: 14px;
         `;
 
-        let isPlaying = false;
+        let isPlaying = false; // BUG: Local state can get out of sync with actual player state
         playButton.addEventListener('click', () => {
             if (isPlaying) {
                 this.player.pause();

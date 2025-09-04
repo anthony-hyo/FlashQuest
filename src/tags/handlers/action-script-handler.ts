@@ -7,13 +7,18 @@ import { Matrix, ColorTransform } from '../../utils/bytes';
 // Action types
 interface ActionData {
     actions: Uint8Array;
-    conditions?: number;
+    conditions?: number; // MISSING: Documentation on what conditions represent
+    // MISSING: Execution context information
+    // MISSING: Error state tracking
 }
 
 export class ActionScriptHandler extends BaseTagHandler {
-    private actionScripts: Map<number, ActionData[]> = new Map();
-    private frameScripts: Map<number, ActionData[]> = new Map();
-    private timeline: Timeline | null = null;
+    private actionScripts: Map<number, ActionData[]> = new Map(); // MEMORY LEAK: Never cleaned up
+    private frameScripts: Map<number, ActionData[]> = new Map(); // MEMORY LEAK: Never cleaned up
+    private timeline: Timeline | null = null; // UNUSED: Set but never used
+    // MISSING: ActionScript execution stack
+    // MISSING: Variable storage/scope management
+    // MISSING: Function call management
 
     canHandle(tag: TagData): boolean {
         return [
@@ -33,14 +38,20 @@ export class ActionScriptHandler extends BaseTagHandler {
                 case SwfTagCode.DoInitAction:
                     await this.handleDoInitAction(tag, frame);
                     break;
+                // MISSING: DefineButton and DefineButton2 handling despite being in canHandle()
+                default:
+                    console.warn(`[ActionScript] Unhandled tag code: ${tag.code}`);
             }
         } catch (error) {
             this.handleError(tag, error as Error);
+            // MISSING: Graceful degradation when ActionScript fails
         }
     }
 
     private async handleDoAction(tag: TagData, frame: Frame): Promise<void> {
         const data = tag.data;
+        // PERFORMANCE: Inefficient byte-by-byte copying
+        // MISSING: Validation of data.remaining size
         const actions = new Uint8Array(data.remaining);
         for (let i = 0; i < data.remaining; i++) {
             actions[i] = data.readUint8();
@@ -52,6 +63,7 @@ export class ActionScriptHandler extends BaseTagHandler {
         });
 
         // Store frame script for execution
+        // BUG: Using frame.actions.length as frame index is wrong
         const frameIndex = frame.actions.length - 1;
         const frameScripts = this.frameScripts.get(frameIndex) || [];
         frameScripts.push({ actions });
@@ -60,7 +72,9 @@ export class ActionScriptHandler extends BaseTagHandler {
 
     private async handleDoInitAction(tag: TagData, frame: Frame): Promise<void> {
         const data = tag.data;
+        // MISSING: Bounds check for spriteId
         const spriteId = data.readUint16();
+        // DUPLICATE CODE: Same inefficient copying as handleDoAction
         const actions = new Uint8Array(data.remaining);
         for (let i = 0; i < data.remaining; i++) {
             actions[i] = data.readUint8();
@@ -78,26 +92,35 @@ export class ActionScriptHandler extends BaseTagHandler {
     }
 
     executeFrameScripts(frameIndex: number): void {
+        // MISSING: Input validation for frameIndex
         const scripts = this.frameScripts.get(frameIndex);
         if (scripts) {
             for (const script of scripts) {
+                // MISSING: Error handling for script execution failures
+                // MISSING: Execution timeout to prevent infinite loops
                 this.executeActionScript(script.actions);
             }
         }
     }
 
     executeInitScripts(spriteId: number): void {
+        // MISSING: Input validation for spriteId
         const scripts = this.actionScripts.get(spriteId);
         if (scripts) {
             for (const script of scripts) {
+                // MISSING: Same issues as executeFrameScripts
                 this.executeActionScript(script.actions);
             }
         }
     }
 
     private executeActionScript(actions: Uint8Array): void {
-        // Basic ActionScript bytecode interpreter
-        let ip = 0;
+        // INCOMPLETE IMPLEMENTATION: Basic ActionScript bytecode interpreter
+        // MISSING: Full ActionScript 1/2/3 opcode support
+        // MISSING: Variable scoping and function calls
+        // MISSING: Movie clip and object model integration
+        // SECURITY: No sandboxing for untrusted ActionScript code
+        let ip = 0; // Instruction pointer
         while (ip < actions.length) {
             const actionCode = actions[ip++];
             switch (actionCode) {

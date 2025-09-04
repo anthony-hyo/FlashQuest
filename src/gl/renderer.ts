@@ -17,6 +17,9 @@ export interface RenderObject {
     ratio?: number;  // For morph shapes
     mask?: number;   // Depth of mask to apply
     isMask?: boolean; // Whether this object is a mask
+    // MISSING: No bounds caching - recalculating bounds on every render is expensive
+    // MISSING: No dirty flag system for optimizing re-renders
+    // TYPE SAFETY ISSUE: shape and sprite are both optional but at least one should be required
 }
 
 class RenderBatch {
@@ -26,9 +29,11 @@ class RenderBatch {
     private indices: number[] = [];
     private indexCount: number = 0;
     private quadCount: number = 0;
-    private readonly BATCH_SIZE!: number;
+    private readonly BATCH_SIZE!: number; // TYPE SAFETY: Using definite assignment but no validation
 
     constructor(size: number) {
+        // MISSING: Input validation - size could be 0 or negative
+        // MISSING: Size limit validation - very large sizes could cause memory issues
         this.BATCH_SIZE = size;
     }
 
@@ -45,9 +50,9 @@ class RenderBatch {
     ): boolean {
         if (this.quadCount >= this.BATCH_SIZE) return false;
 
-        const vertexOffset = this.quadCount * 12;
+        const vertexOffset = this.quadCount * 12; // BUG: Should be * 4 for 4 vertices per quad
         this.vertices.push(
-            x1, y1, x2, y2, x3, y3, x4, y4
+            x1, y1, x2, y2, x3, y3, x4, y4 // BUG: Only 8 values but expecting 12 vertices per quad
         );
 
         this.colors.push(
@@ -77,6 +82,8 @@ class RenderBatch {
     }
 
     clear() {
+        // PERFORMANCE ISSUE: Setting length = 0 doesn't free memory, arrays keep growing
+        // MEMORY LEAK: Should use splice(0) or create new arrays to free memory
         this.vertices.length = 0;
         this.colors.length = 0;
         this.uvs.length = 0;
@@ -103,23 +110,23 @@ class RenderBatch {
 }
 
 export class WebGLRenderer {
-    private canvas!: HTMLCanvasElement;
-    private gl!: WebGLRenderingContext;
+    private canvas!: HTMLCanvasElement; // TYPE SAFETY: Definite assignment without initialization
+    private gl!: WebGLRenderingContext; // TYPE SAFETY: Could be null if WebGL not supported
     // Shader programs
     private shaderProgram!: WebGLProgram; // solid
-    private gradientShaderProgram!: WebGLProgram;
-    private bitmapShaderProgram!: WebGLProgram;
-    private colorTransformShaderProgram!: WebGLProgram;
-    private filterShaderProgram!: WebGLProgram;
+    private gradientShaderProgram!: WebGLProgram; // MISSING: Error handling if gradient shaders fail
+    private bitmapShaderProgram!: WebGLProgram; // MISSING: Error handling if bitmap shaders fail
+    private colorTransformShaderProgram!: WebGLProgram; // UNINITIALIZED: Declared but never initialized
+    private filterShaderProgram!: WebGLProgram; // UNINITIALIZED: Declared but never initialized
     // Buffers
-    private vertexBuffer!: WebGLBuffer;
+    private vertexBuffer!: WebGLBuffer; // TYPE SAFETY: Could be null if buffer creation fails
     private colorBuffer!: WebGLBuffer;
     private uvBuffer!: WebGLBuffer;
     // Framebuffer and mask
-    private frameBuffer!: WebGLFramebuffer;
-    private maskTexture!: WebGLTexture;
+    private frameBuffer!: WebGLFramebuffer; // UNINITIALIZED: Used in initFramebuffer but never called
+    private maskTexture!: WebGLTexture; // UNINITIALIZED: Used in initFramebuffer but never called
     // Texture management
-    private textures: Map<number, WebGLTexture> = new Map();
+    private textures: Map<number, WebGLTexture> = new Map(); // MEMORY LEAK: Textures never cleaned up
     // Background color
     private backgroundColor: Color = { r: 1, g: 1, b: 1, a: 1 };
     // Batch manager
@@ -130,10 +137,11 @@ export class WebGLRenderer {
     private aVertexPosition!: number;
     private aVertexColor!: number;
     // Mask stack
-    private maskStack: any[] = [];
+    private maskStack: any[] = []; // TYPE SAFETY: Should be typed - what are the mask objects?
 
     constructor(canvas: HTMLCanvasElement, size: number = 2048) {
         this.canvas = canvas;
+        // BUG: No null check - getContext could return null if WebGL not supported
         this.gl = canvas.getContext('webgl')!;
         this.batchManager = new RenderBatch(size);
         // Initialize solid shader and assign all locations
@@ -143,15 +151,18 @@ export class WebGLRenderer {
         this.aVertexColor = solid.aVertexColor;
         this.uProjectionMatrix = solid.uProjectionMatrix;
         this.uModelViewMatrix = solid.uModelViewMatrix;
-        // Init optional shaders (not strictly required yet)
+        // INCOMPLETE: Init optional shaders with try/catch but errors are silently ignored
+        // MISSING: These shader programs are never properly initialized for use
         try { this.gradientShaderProgram = this.initGradientShaders().program; } catch {}
         try { this.bitmapShaderProgram = this.initBitmapShaders().program; } catch {}
         // Create buffers
+        // BUG: No null checks - createBuffer could return null
         this.vertexBuffer = this.gl.createBuffer()!;
         this.colorBuffer = this.gl.createBuffer()!;
         this.uvBuffer = this.gl.createBuffer()!;
         // Initial viewport
         this.setupViewport();
+        // MISSING: initFramebuffer() is never called, leaving frameBuffer and maskTexture uninitialized
     }
 
     private initFramebuffer() {
@@ -192,10 +203,12 @@ export class WebGLRenderer {
 
     // ---------------- Shader Creation ----------------
     private createShader(type: number, source: string): WebGLShader {
+        // BUG: No null check - createShader could return null
         const shader = this.gl.createShader(type)!;
         this.gl.shaderSource(shader, source);
         this.gl.compileShader(shader);
         // TODO: Add more robust error handling for shader compilation failures.
+        // BUG: Error handling exists but shader is still deleted on error (resource leak)
         if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
             const info = this.gl.getShaderInfoLog(shader);
             this.gl.deleteShader(shader);
@@ -205,16 +218,21 @@ export class WebGLRenderer {
     }
 
     private initSolidShaders() {
+        // MAINTAINABILITY ISSUE: Shader source as minified strings - hard to debug and modify
+        // MISSING: Shader source should be in separate files or at least formatted properly
         const vs = `attribute vec2 aVertexPosition;\nattribute vec4 aVertexColor;\nuniform mat4 uModelViewMatrix;\nuniform mat4 uProjectionMatrix;\nvarying vec4 vColor;\nvoid main(){gl_Position=uProjectionMatrix*uModelViewMatrix*vec4(aVertexPosition,0.0,1.0);vColor=aVertexColor;}`;
         const fs = `precision mediump float;\nvarying vec4 vColor;\nvoid main(){gl_FragColor=vColor;}`;
+        // BUG: No null check - createProgram could return null
         const program = this.gl.createProgram()!;
         this.gl.attachShader(program, this.createShader(this.gl.VERTEX_SHADER, vs));
         this.gl.attachShader(program, this.createShader(this.gl.FRAGMENT_SHADER, fs));
         this.gl.linkProgram(program);
+        // BUG: Error handling throws but doesn't clean up attached shaders (resource leak)
         if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) throw new Error('Link error');
         this.gl.useProgram(program);
         const aVertexPosition = this.gl.getAttribLocation(program, 'aVertexPosition');
         const aVertexColor = this.gl.getAttribLocation(program, 'aVertexColor');
+        // BUG: No null checks - getUniformLocation could return null
         const uProjectionMatrix = this.gl.getUniformLocation(program, 'uProjectionMatrix')!;
         const uModelViewMatrix = this.gl.getUniformLocation(program, 'uModelViewMatrix')!;
         this.gl.enableVertexAttribArray(aVertexPosition);

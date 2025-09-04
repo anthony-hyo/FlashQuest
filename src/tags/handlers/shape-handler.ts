@@ -13,7 +13,7 @@ export interface MorphShape {
 }
 
 export class ShapeTagHandler extends BaseTagHandler {
-    private morphShapes: Map<number, MorphShape> = new Map();
+    private morphShapes: Map<number, MorphShape> = new Map(); // MEMORY LEAK: Map never cleaned up
 
     canHandle(tag: TagData): boolean {
         return [
@@ -30,6 +30,7 @@ export class ShapeTagHandler extends BaseTagHandler {
         try {
             const data = tag.data;
             
+            // MAGIC NUMBER: 2 bytes for characterId, but no validation it's actually available
             // Check if we have enough data to read characterId
             if (data.remaining < 2) {
                 console.warn(`[Shape] Insufficient data for characterId in tag ${tag.code}`);
@@ -46,6 +47,7 @@ export class ShapeTagHandler extends BaseTagHandler {
                     data: { characterId, morphShape }
                 });
             } else {
+                // MAGIC NUMBER: 10 bytes minimum is arbitrary and may not be sufficient for all shapes
                 // Check if we have enough remaining data for shape parsing
                 if (data.remaining < 10) { // Minimum data for bounds + basic shape data
                     console.warn(`[Shape] Insufficient data for shape parsing in tag ${tag.code}, characterId ${characterId}`);
@@ -61,24 +63,30 @@ export class ShapeTagHandler extends BaseTagHandler {
                 console.log(`[Shape] Successfully parsed shape ${characterId} for tag ${tag.code}`);
             }
         } catch (error) {
+            // BUG: Error handling loses context about which characterId failed
             this.handleError(tag, error as Error);
         }
     }
 
     private async parseMorphShape(data: any, tagCode: number): Promise<MorphShape> {
+        // MISSING: Input validation for data parameter
+        // MISSING: Bounds checks before reading rect data
         const startBounds = data.readRect();
         const endBounds = data.readRect();
         
         if (tagCode === SwfTagCode.DefineMorphShape2) {
             // Additional bounds for strokes
-            data.readRect(); // startEdgeBounds
-            data.readRect(); // endEdgeBounds
-            data.readUint8(); // reserved flags
+            data.readRect(); // startEdgeBounds - UNUSED: Read but never stored
+            data.readRect(); // endEdgeBounds - UNUSED: Read but never stored
+            data.readUint8(); // reserved flags - UNUSED: Read but never validated
         }
 
+        // MISSING: Validation that offset is within valid range
         const offset = data.readUint32();
         const startShape = parseShape(data, SwfTagCode.DefineShape3);  // Morph shapes use Shape3 format
         
+        // BUG: Direct position assignment could jump to invalid location
+        // MISSING: Bounds check that offset is within data buffer
         // Position data stream at end shape offset
         data.position = offset;
         const endShape = parseShape(data, SwfTagCode.DefineShape3);  // Morph shapes use Shape3 format

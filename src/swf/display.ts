@@ -14,6 +14,9 @@ export interface DisplayObject {
 	ratio?: number;       // For morph shapes
 	clipDepth?: number;   // For masking
 	isMask?: boolean;     // Whether this object is a mask
+	// TYPE SAFETY ISSUE: Either shape or sprite should be required, not both optional
+	// MISSING: No z-index or layer management beyond depth
+	// MISSING: No caching mechanism for expensive transformations
 }
 
 export interface SpriteDefinition {
@@ -84,11 +87,12 @@ export class DisplayList {
 		if (existing && !data.hasCharacter) {
 			// Update existing object
 			if (data.hasMatrix) {
-				existing.matrix = data.matrix!;
+				existing.matrix = data.matrix!; // BUG: Using ! operator without null check
 			}
 			if (data.hasColorTransform) {
 				existing.colorTransform = data.colorTransform;
 			}
+			// BUG: Ratio check is incorrect - should check hasRatio flag instead
 			if (data.hasRatio && existing.ratio !== undefined) {
 				existing.ratio = data.ratio;
 			}
@@ -110,7 +114,7 @@ export class DisplayList {
 						definition: spriteDefinition,
 						currentFrame: 0,
 						playing: true,
-						displayList: new DisplayList()
+						displayList: new DisplayList() // PERFORMANCE ISSUE: Creating new DisplayList without pooling
 					};
 					console.log('[DisplayList] Created sprite instance:', { characterId: data.characterId, frameCount: spriteDefinition.frameCount });
 				}
@@ -121,6 +125,7 @@ export class DisplayList {
 			let type = 'shape';
 			
 			if (morphShape) {
+				// PERFORMANCE ISSUE: Interpolating morph shape on every placeObject call
 				// Interpolate morph shape for the given ratio
 				displayShape = this.interpolateMorphShape(morphShape, ratio);
 				type = 'morphShape';
@@ -133,10 +138,10 @@ export class DisplayList {
 				depth: data.depth,
 				matrix: data.matrix || this.createIdentityMatrix(),
 				colorTransform: data.colorTransform,
-				visible: true,
+				visible: true, // MISSING: visibility should come from PlaceObjectData, not hardcoded
 				shape: displayShape,
 				sprite: sprite,
-				bounds: displayShape?.bounds,
+				bounds: displayShape?.bounds, // MISSING: sprite bounds calculation
 				ratio: morphShape ? ratio : undefined
 			};
 
@@ -146,6 +151,7 @@ export class DisplayList {
 	}
 
 	   private interpolateMorphShape(morphShape: MorphShape, ratio: number): Shape {
+		   // MISSING: Input validation - ratio could be NaN or Infinity
 		   // Clamp ratio
 		   ratio = Math.max(0, Math.min(1, ratio));
 		   // Simple linear interpolation for bounds, fillStyles, lineStyles, and records
@@ -157,6 +163,7 @@ export class DisplayList {
 			   yMin: lerp(morphShape.startShape.bounds.yMin, morphShape.endShape.bounds.yMin),
 			   yMax: lerp(morphShape.startShape.bounds.yMax, morphShape.endShape.bounds.yMax)
 		   };
+		   // INCOMPLETE IMPLEMENTATION: Only interpolating bounds, not the actual shape geometry
 		   // For now, just use startShape's fillStyles, lineStyles, and records (no morphing)
 		   // TODO: Implement full interpolation for fillStyles, lineStyles, and records
 		   return {

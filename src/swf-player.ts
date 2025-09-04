@@ -18,26 +18,32 @@ export class SWFPlayer {
     private renderer: WebGLRenderer;
     private timeline: Timeline = new Timeline();
     private isPlaying: boolean = false;
-    private frameRate: number = 12;
+    private frameRate: number = 12; // HARDCODED: Should read from SWF header
     private animationId: number | null = null;
-    private lastFrameTime: number = 0;
+    private lastFrameTime: number = 0; // PERFORMANCE: No frame rate limiting or smoothing
     private tagHandlers: TagHandlerRegistry = new TagHandlerRegistry();
-    private resourceCache: Map<number, any> = new Map();
-    private interactiveObjects: Map<number, any> = new Map();
+    private resourceCache: Map<number, any> = new Map(); // TYPE SAFETY: 'any' type loses type information
+    private interactiveObjects: Map<number, any> = new Map(); // TYPE SAFETY: 'any' type loses type information
+    // MEMORY LEAK: These caches are never cleaned up
     private soundHandler: SoundHandler;
     private spriteHandler: SpriteHandler;
     private actionScriptHandler: ActionScriptHandler;
     private shapeHandler: ShapeTagHandler;
+    // MISSING: No error state management
+    // MISSING: No loading progress tracking
+    // MISSING: No pause/resume state persistence
 
     constructor(canvas: HTMLCanvasElement) {
+        // MISSING: Input validation - canvas could be null
         this.canvas = canvas;
-        this.renderer = new WebGLRenderer(canvas, 2048);
+        this.renderer = new WebGLRenderer(canvas, 2048); // HARDCODED: Batch size should be configurable
         this.soundHandler = new SoundHandler();
         this.spriteHandler = new SpriteHandler();
         this.actionScriptHandler = new ActionScriptHandler();
         this.shapeHandler = new ShapeTagHandler();
         this.initTagHandlers();
         this.setupInteractivity();
+        // MISSING: No cleanup registration for proper disposal
     }
 
     private initTagHandlers() {
@@ -52,6 +58,7 @@ export class SWFPlayer {
         ], this.shapeHandler);
 
         // Register button handler
+        // BUG: Creating new ButtonHandler() instead of reusing instance leads to memory waste
         this.tagHandlers.register([
             SwfTagCode.DefineButton,
             SwfTagCode.DefineButton2
@@ -66,6 +73,7 @@ export class SWFPlayer {
         ], this.soundHandler);
 
         // Register sprite handler
+        // BUG: PlaceObject tags registered to sprite handler but also used by other handlers - overlap conflict
         this.tagHandlers.register([
             SwfTagCode.DefineSprite,
             SwfTagCode.PlaceObject,
@@ -74,12 +82,14 @@ export class SWFPlayer {
         ], this.spriteHandler);
 
         // Register filter handler
+        // BUG: PlaceObject2/3 registered to both sprite and filter handlers - which one wins?
         this.tagHandlers.register([
             SwfTagCode.PlaceObject2,
             SwfTagCode.PlaceObject3
         ], new FilterHandler());
 
         // Register morph shape handler
+        // BUG: Creating new instance instead of reusing
         this.tagHandlers.register([
             SwfTagCode.DefineMorphShape,
             SwfTagCode.DefineMorphShape2
@@ -90,25 +100,36 @@ export class SWFPlayer {
             SwfTagCode.DoAction,
             SwfTagCode.DoInitAction
         ], this.actionScriptHandler);
+        // MISSING: Many SWF tag types not handled (DefineText, DefineBitmap, etc.)
     }
 
     private setupInteractivity() {
         // Set up event listeners for button interactions
+        // MEMORY LEAK: Event listeners never removed - should store references for cleanup
+        // MISSING: Touch events for mobile support
+        // MISSING: Keyboard events for accessibility
         this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
         this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
         this.canvas.addEventListener('mousemove', this.handleMouseMove.bind(this));
+        // MISSING: Context menu handling
+        // MISSING: Focus/blur events for proper state management
     }
 
     private handleMouseDown(event: MouseEvent) {
+        // PERFORMANCE: Linear search through all interactive objects on every mouse event
+        // MISSING: Event bubbling/capturing system like Flash had
         const pos = this.getCanvasPosition(event);
         for (const [id, obj] of this.interactiveObjects) {
             if (this.hitTest(pos, obj)) {
+                // TYPE SAFETY: Optional chaining on untyped 'any' object
                 obj.handleMouseDown?.();
+                // MISSING: Event propagation control (stopPropagation, preventDefault)
             }
         }
     }
 
     private handleMouseUp(event: MouseEvent) {
+        // DUPLICATE CODE: Same pattern as handleMouseDown - should be abstracted
         const pos = this.getCanvasPosition(event);
         for (const [id, obj] of this.interactiveObjects) {
             if (this.hitTest(pos, obj)) {
@@ -118,6 +139,7 @@ export class SWFPlayer {
     }
 
     private handleMouseMove(event: MouseEvent) {
+        // PERFORMANCE: Expensive hit testing on every mouse move, should throttle
         const pos = this.getCanvasPosition(event);
         for (const [id, obj] of this.interactiveObjects) {
             const isHit = this.hitTest(pos, obj);
@@ -129,10 +151,13 @@ export class SWFPlayer {
                 obj.isOver = false;
             }
         }
+        // MISSING: Cursor change on hover
     }
 
     private getCanvasPosition(event: MouseEvent): { x: number; y: number } {
         const rect = this.canvas.getBoundingClientRect();
+        // BUG: Doesn't account for canvas CSS transforms or page scroll
+        // MISSING: Device pixel ratio handling for high-DPI displays
         return {
             x: (event.clientX - rect.left) * (this.canvas.width / rect.width),
             y: (event.clientY - rect.top) * (this.canvas.height / rect.height)
@@ -140,11 +165,15 @@ export class SWFPlayer {
     }
 
     private hitTest(pos: { x: number; y: number }, obj: any): boolean {
+        // INCOMPLETE: Very basic AABB hit testing only
+        // MISSING: Pixel-perfect hit testing for complex shapes
+        // MISSING: Rotation and skew handling in matrix transformations
         // Implement hit testing using shape bounds and matrices
         const bounds = obj.shape.bounds;
         const matrix = obj.matrix || { scaleX: 1, scaleY: 1, translateX: 0, translateY: 0 };
         
         // Transform point to object space
+        // MAGIC NUMBER: /20 hardcoded conversion factor appears multiple times
         const localX = (pos.x - matrix.translateX / 20) / matrix.scaleX;
         const localY = (pos.y - matrix.translateY / 20) / matrix.scaleY;
         
@@ -154,6 +183,8 @@ export class SWFPlayer {
 
     async loadSWF(source: string | File): Promise<void> {
         try {
+            // MISSING: Loading progress events for large files
+            // MISSING: Validation of file format before parsing
             const { dataView } = await loadSwf(source);
             const { header, tags } = parseSwf(dataView);
 
@@ -161,26 +192,33 @@ export class SWFPlayer {
             this.setupCanvas(header.frameSize);
             await this.buildTimeline(tags);
             
+            // LOGIC ERROR: Should validate timeline was built successfully
             if (this.timeline.getTotalFrames() === 0) {
                 console.warn('No frames found in SWF, creating test content');
-                this.createTestContent();
+                this.createTestContent(); // DEVELOPMENT CODE: Test content in production
             }
 
             this.timeline.gotoFrame(0);
             this.render();
 
         } catch (error) {
+            // BUG: Error state not tracked - player could be in inconsistent state
             console.error('Failed to load SWF:', error);
             throw error;
         }
     }
 
     private setupCanvas(frameSize: { xMin: number; xMax: number; yMin: number; yMax: number }) {
+        // MAGIC NUMBER: /20 conversion factor should be a named constant
         const width = Math.abs(frameSize.xMax - frameSize.xMin) / 20;
         const height = Math.abs(frameSize.yMax - frameSize.yMin) / 20;
         
+        // HARDCODED: Fallback sizes should be configurable
+        // MISSING: Aspect ratio preservation
         this.canvas.width = Math.min(width, 1200) || 800;
         this.canvas.height = Math.min(height, 800) || 600;
+        // MISSING: Viewport scaling/fitting options
+        // MISSING: High-DPI display support
     }
 
     private async buildTimeline(tags: TagData[]) {
@@ -189,6 +227,7 @@ export class SWFPlayer {
         
         console.log('[Build Timeline] Processing', tags.length, 'tags');
         
+        // PERFORMANCE: Sequential processing - could parallelize non-dependent operations
         // Process tags sequentially to avoid data corruption
         for (let i = 0; i < tags.length; i++) {
             const tag = tags[i];
@@ -202,11 +241,12 @@ export class SWFPlayer {
             try {
                 const handler = this.tagHandlers.getHandler(tag.code);
                 if (handler) {
+                    // ASYNC ISSUE: No timeout or cancellation for long-running tag processing
                     await handler.handle(tag, currentFrame, displayList);
                     console.log(`[Build Timeline] Successfully processed ${this.getTagName(tag.code)} (${tag.code})`);
                 } else if (tag.code === SwfTagCode.ShowFrame) {
                     this.timeline.addFrame(currentFrame);
-                    currentFrame = { actions: [] };
+                    currentFrame = { actions: [] }; // PERFORMANCE: Object creation every frame
                     console.log('[Build Timeline] ShowFrame - frame added');
                 } else if (tag.code === SwfTagCode.End) {
                     if (currentFrame.actions.length > 0) {
@@ -215,11 +255,13 @@ export class SWFPlayer {
                     console.log('[Build Timeline] End tag reached');
                     break; // Stop processing after End tag
                 } else {
+                    // MISSING: Track unhandled tags for debugging
                     console.log(`[Build Timeline] No handler for tag ${this.getTagName(tag.code)} (${tag.code})`);
                 }
             } catch (error) {
                 console.error(`Error processing tag ${this.getTagName(tag.code)} (${tag.code}):`, error);
                 // Continue processing other tags instead of failing completely
+                // MISSING: Error recovery strategy - corrupted timeline could render incorrectly
             }
         }
         
@@ -230,9 +272,12 @@ export class SWFPlayer {
         
         console.log('[Build Timeline] Total frames:', this.timeline.getTotalFrames());
         console.log('[Build Timeline] Display list has', displayList.getObjects().length, 'objects');
+        // MISSING: Validation that timeline is in valid state
     }
 
     private getTagName(code: number): string {
+        // INCOMPLETE: Missing many SWF tag types
+        // MAINTAINABILITY: Should be imported from tags enum or constants
         const tagNames: { [key: number]: string } = {
             0: 'End',
             1: 'ShowFrame',
@@ -246,6 +291,7 @@ export class SWFPlayer {
             32: 'DefineShape3',
             70: 'PlaceObject3',
             83: 'DefineShape4'
+            // MISSING: DefineSprite, DefineButton, DefineText, DefineBitmap, etc.
         };
         return tagNames[code] || `Unknown(${code})`;
     }
@@ -253,6 +299,7 @@ export class SWFPlayer {
     private createTestContent() {
         console.log('Creating test content - red square');
         
+        // DEVELOPMENT CODE: Test content should not be in production
         // Create a simple red square shape that should definitely render
         const testShape = {
             bounds: { xMin: 0, xMax: 2000, yMin: 0, yMax: 2000 }, // 100x100 pixels
@@ -318,7 +365,7 @@ export class SWFPlayer {
     }
 
     play() {
-        if (this.isPlaying) return;
+        if (this.isPlaying) return; // MISSING: Should emit event for state change
 
         this.isPlaying = true;
         this.lastFrameTime = performance.now();
@@ -335,6 +382,7 @@ export class SWFPlayer {
         }
 
         console.log('Reprodução pausada');
+        // MISSING: Should emit pause event
     }
 
     stop() {
@@ -343,11 +391,15 @@ export class SWFPlayer {
         this.render();
 
         console.log('Reprodução parada');
+        // MISSING: Should emit stop event
+        // MISSING: Should reset all object states
     }
 
     gotoFrame(frameNumber: number) {
+        // MISSING: Input validation - frameNumber could be negative or out of bounds
         this.timeline.gotoFrame(frameNumber);
         this.render();
+        // MISSING: Should emit frame change event
     }
 
     getCurrentFrame(): number {

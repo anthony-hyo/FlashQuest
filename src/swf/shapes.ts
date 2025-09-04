@@ -100,6 +100,8 @@ export function createNormalizedColor(r: number, g: number, b: number, a: number
 }
 
 export function lerpColor(start: NormalizedColor, end: NormalizedColor, ratio: number): NormalizedColor {
+    // BUG: No input validation - ratio should be clamped to [0,1] range
+    // PERFORMANCE: Could be optimized by caching 1-ratio calculation
     return {
         r: end.r * ratio + start.r * (1 - ratio),
         g: end.g * ratio + start.g * (1 - ratio),
@@ -118,6 +120,8 @@ export function colorToHex(color: NormalizedColor): string {
 export function parseShape(data: Bytes, shapeVersion: number): Shape {
     const bounds = data.readRect();
     
+    // LOGIC ERROR: shapeVersion comparison uses enum values inconsistently - should validate enum type
+    // MISSING: Error handling for corrupt shape version values
     // Para DefineShape4, ler edge bounds e flags corretamente (bit a bit)
     if (shapeVersion === SwfTagCode.DefineShape4) {
         // EdgeBounds (RECT)
@@ -131,7 +135,9 @@ export function parseShape(data: Bytes, shapeVersion: number): Shape {
         // Alinhar para o próximo byte antes de ler arrays
         data.align();
         void edgeBounds; void usesFillWindingRule; void usesNonScalingStrokes; void usesScalingStrokes;
+        // MISSING: These parsed flags are read but never used - should be stored in Shape interface
     } else {
+        // INCOMPLETE: Other shape versions may have different parsing requirements not handled here
         // Outros formatos: alinhar antes dos arrays
         data.align();
     }
@@ -159,6 +165,7 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
     
     let fillStyleCount = data.readUint8();
 
+    // LOGIC ERROR: This condition is dangerous - should check data.remaining before reading uint16
     if (fillStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
         if (data.remaining < 2) {
             console.warn('[SWF] Insufficient data for extended fill style count');
@@ -168,6 +175,7 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
     }
     
     // Safety check for unreasonable fill style counts
+    // MAGIC NUMBER: 100 is arbitrary - should be configurable constant
     if (fillStyleCount > 100) {
         console.warn(`[SWF] Suspiciously high fill style count: ${fillStyleCount}, possibly corrupted data. Attempting recovery...`);
         return attemptColorRecovery(data, shapeVersion);
@@ -182,6 +190,7 @@ function parseFillStyles(data: Bytes, shapeVersion: number): FillStyle[] {
         const fillType = data.readUint8();
         
         try {
+            // TYPE SAFETY ISSUE: fillType cast to FillStyleType without validation
             const fillStyle = parseSingleFillStyle(data, fillType as FillStyleType, shapeVersion);
             fillStyles.push(fillStyle);
         } catch (error) {
@@ -206,6 +215,8 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
     try {
         data.position = startPos;
         const rawBytes: number[] = [];
+        // MAGIC NUMBER: 30 byte scan limit is arbitrary
+        // PERFORMANCE ISSUE: Reading bytes one by one in a loop
         for (let i = 0; i < Math.min(30, data.remaining); i++) {
             rawBytes.push(data.readUint8());
         }
@@ -214,6 +225,7 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
         // Look for SWF fill style patterns
         let recoveredColor: NormalizedColor | null = null;
         
+        // LOGIC ERROR: This loop may access out-of-bounds indices (i+3)
         for (let i = 0; i < rawBytes.length - 4; i++) {
             if (rawBytes[i] === FillStyleType.Solid) {
                 // Found solid fill type marker
@@ -230,6 +242,7 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
         // If no marker found, look for reasonable RGB sequences
         if (!recoveredColor) {
             console.log(`[SWF] No fill type marker found, analyzing RGB patterns:`);
+            // LOGIC ERROR: This loop may access out-of-bounds indices (i+2)
             for (let i = 0; i < rawBytes.length - 2; i++) {
                 const r = rawBytes[i] / 255;
                 const g = rawBytes[i + 1] / 255;
@@ -244,6 +257,7 @@ function attemptColorRecovery(data: Bytes, shapeVersion: number): FillStyle[] {
             }
         }
         
+        // MISSING: data.position is not restored after recovery attempt
         return [{
             type: FillStyleType.Solid,
             color: recoveredColor || createNormalizedColor(1, 0, 0, 1) // Red fallback
@@ -316,6 +330,7 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     
     let lineStyleCount = data.readUint8();
 
+    // LOGIC ERROR: Same issue as fillStyles - should check data.remaining before reading uint16
     if (lineStyleCount === 0xFF && shapeVersion >= SwfTagCode.DefineShape2) {
         if (data.remaining < 2) {
             console.warn('[SWF] Insufficient data for extended line style count');
@@ -325,6 +340,7 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
     }
     
     // Safety check for unreasonable line style counts
+    // MAGIC NUMBER: 50 is arbitrary - should be configurable constant
     if (lineStyleCount > 50) {
         console.warn(`[SWF] Suspiciously high line style count: ${lineStyleCount}, possibly corrupted data. Skipping line styles.`);
         return lineStyles;
@@ -359,6 +375,7 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
             const endCapStyle = data.readUnsignedBits(2);
 
             let miterLimitFactor;
+            // LOGIC ERROR: Magic number 2 for joinStyle should be constant MITER_JOIN
             if (joinStyle === 2) {
                 if (data.remaining < 2) {
                     console.warn(`[SWF] Insufficient data for miter limit factor in line style ${i + 1}`);
@@ -376,6 +393,7 @@ function parseLineStyles(data: Bytes, shapeVersion: number): LineStyle[] {
                     console.warn(`[SWF] No data available for fill styles in line style ${i + 1}`);
                     color = { r: 0, g: 0, b: 0, a: 1 };
                 } else {
+                    // PERFORMANCE ISSUE: Parsing full fill styles array but only using first one
                     const fillStyles = parseFillStyles(data, shapeVersion);
                     fillType = fillStyles.length > 0 ? fillStyles[0] : undefined;
                     color = (fillType && fillType.color) ? fillType.color : { r: 0, g: 0, b: 0, a: 1 };
@@ -467,6 +485,8 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
     
     let recordCount = 0;
 
+    // MAGIC NUMBER: 100 record limit is arbitrary and could truncate valid data
+    // MISSING: No checks for infinite loops caused by corrupted bit data
     while (true && recordCount < 100) { // Add safety limit
         if (data.eof || data.remaining < 1) {
             console.warn('[SWF] No more data for shape records, stopping');
@@ -488,6 +508,7 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
 
             if (stateMoveTo) {
                 const moveBits = data.readUnsignedBits(5);
+                // PERFORMANCE ISSUE: No bounds checking on coordinate values
                 const deltaX = data.readSignedBits(moveBits);
                 const deltaY = data.readSignedBits(moveBits);
                 currentX = deltaX;
@@ -496,6 +517,7 @@ function parseShapeRecords(data: Bytes): ShapeRecord[] {
             }
 
             if (stateFillStyle0) {
+                // BUG: fillBits could be 0, causing readUnsignedBits(0) which may behave unexpectedly
                 record.fillStyle0 = data.readUnsignedBits(fillBits);
             }
 
