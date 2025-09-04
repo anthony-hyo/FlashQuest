@@ -18,15 +18,38 @@ export function parseSwf(dataView: DataView): { header: SwfHeader, tags: SwfTag[
         frameCount
     };
 
-    // Ler tags
+    // Ler tags com salvaguardas
     const tags: SwfTag[] = [];
+    let lastPosition = bytes.position;
+    let iterations = 0;
 
     while (!bytes.eof && bytes.remaining > 2) {
+        iterations++;
         try {
             const tag = parseTag(bytes);
             tags.push(tag);
 
+            // Progress log a cada 50 tags
+            if (tags.length % 50 === 0) {
+                console.log(`[SWF] Parsed ${tags.length} tags... position=${bytes.position} remaining=${bytes.remaining}`);
+            }
+
+            // Verificar fim
             if (tag.code === SwfTagCode.End) {
+                console.log('[SWF] End tag encountered, stopping parse');
+                break;
+            }
+
+            // Infinite loop safeguard: posição não avançou
+            if (bytes.position === lastPosition) {
+                console.warn('[SWF] Parser position did not advance. Aborting to prevent infinite loop.');
+                break;
+            }
+            lastPosition = bytes.position;
+
+            // Hard safety limit
+            if (tags.length > 10000) {
+                console.warn('[SWF] Tag count exceeded 10000. Aborting parse for safety.');
                 break;
             }
         } catch (error) {
@@ -35,6 +58,7 @@ export function parseSwf(dataView: DataView): { header: SwfHeader, tags: SwfTag[
         }
     }
 
+    console.log(`[SWF] Total tags parsed: ${tags.length}`);
     return { header, tags };
 }
 
@@ -59,4 +83,3 @@ function parseTag(bytes: Bytes): SwfTag {
 }
 
 export { SwfHeader, SwfTag, SwfTagCode };
-
