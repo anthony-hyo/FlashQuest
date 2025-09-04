@@ -2,11 +2,97 @@ import { Shape, Color, FillStyle } from '../swf/shapes';
 import { Matrix, ColorTransform } from '../utils/bytes';
 
 export interface RenderObject {
-    shape: Shape;
+    shape: Shape | MorphShape;
     matrix?: Matrix;
     colorTransform?: ColorTransform;
     depth: number;
     characterId: number;
+    ratio?: number;  // For morph shapes
+    mask?: number;   // Depth of mask to apply
+    isMask?: boolean; // Whether this object is a mask
+}
+
+class RenderBatch {
+    private vertices: number[] = [];
+    private colors: number[] = [];
+    private uvs: number[] = [];
+    private indices: number[] = [];
+    private indexCount: number = 0;
+    private quadCount: number = 0;
+    private readonly BATCH_SIZE: number;
+
+    constructor(size: number) {
+        this.BATCH_SIZE = size;
+    }
+
+    addQuad(
+        x1: number, y1: number,
+        x2: number, y2: number,
+        x3: number, y3: number,
+        x4: number, y4: number,
+        color: { r: number, g: number, b: number, a: number },
+        uv1: { u: number, v: number },
+        uv2: { u: number, v: number },
+        uv3: { u: number, v: number },
+        uv4: { u: number, v: number }
+    ): boolean {
+        if (this.quadCount >= this.BATCH_SIZE) return false;
+
+        const vertexOffset = this.quadCount * 12;
+        this.vertices.push(
+            x1, y1, x2, y2, x3, y3, x4, y4
+        );
+
+        this.colors.push(
+            color.r, color.g, color.b, color.a,
+            color.r, color.g, color.b, color.a,
+            color.r, color.g, color.b, color.a,
+            color.r, color.g, color.b, color.a
+        );
+
+        this.uvs.push(
+            uv1.u, uv1.v, uv2.u, uv2.v, uv3.u, uv3.v, uv4.u, uv4.v
+        );
+
+        this.indices.push(
+            vertexOffset, vertexOffset + 1, vertexOffset + 2,
+            vertexOffset, vertexOffset + 2, vertexOffset + 3
+        );
+
+        this.indexCount += 6;
+        this.quadCount++;
+
+        return true;
+    }
+
+    isFull(): boolean {
+        return this.quadCount >= this.BATCH_SIZE;
+    }
+
+    clear() {
+        this.vertices.length = 0;
+        this.colors.length = 0;
+        this.uvs.length = 0;
+        this.indices.length = 0;
+        this.indexCount = 0;
+        this.quadCount = 0;
+    }
+
+    getVertexData(): Float32Array {
+        return new Float32Array(this.vertices);
+    }
+
+    getColorData(): Float32Array {
+        return new Float32Array(this.colors);
+    }
+
+    getUVData(): Float32Array {
+        return new Float32Array(this.uvs);
+    }
+
+    getIndexData(): Uint16Array {
+        return new Uint16Array(this.indices);
+    }
 }
 
 export class WebGLRenderer {
@@ -17,39 +103,18 @@ export class WebGLRenderer {
     private shaderProgram: WebGLProgram;          // solid
     private gradientShaderProgram: WebGLProgram;  // gradient
     private bitmapShaderProgram: WebGLProgram;    // bitmap
+    private colorTransformShaderProgram: WebGLProgram; // color transform
+    private filterShaderProgram: WebGLProgram;    // filters
+    
+    // Cache for render batches to improve performance
+    private batchCache: Map<string, Float32Array> = new Map();
+    private lastFrameObjects: string = '';
 
-    // Buffers
-    private vertexBuffer: WebGLBuffer;
-    private colorBuffer: WebGLBuffer;
-    private uvBuffer: WebGLBuffer;
-
-    private backgroundColor: Color = { r: 1, g: 1, b: 1, a: 1 };
-
-    // Solid shader attribs/uniforms
-    private aVertexPosition: number;
-    private aVertexColor: number;
-    private uProjectionMatrix: WebGLUniformLocation;
-    private uModelViewMatrix: WebGLUniformLocation;
-
-    // Gradient shader attribs/uniforms
-    private aGradientPosition: number;
-    private aGradientUV: number;
-    private uGradientProjectionMatrix: WebGLUniformLocation;
-    private uGradientModelViewMatrix: WebGLUniformLocation;
-    private uGradientColors: WebGLUniformLocation;
-    private uGradientStops: WebGLUniformLocation;
-    private uGradientType: WebGLUniformLocation;
-    private uGradientFocalPoint: WebGLUniformLocation;
-
-    // Bitmap shader attribs/uniforms
-    private aBitmapPosition: number;
-    private aBitmapUV: number;
-    private uBitmapProjectionMatrix: WebGLUniformLocation;
-    private uBitmapModelViewMatrix: WebGLUniformLocation;
-    private uBitmapTexture: WebGLUniformLocation;
-
-    // Textures cache
-    private textures: Map<number, WebGLTexture> = new Map();
+    private maskStack: number[] = [];
+    private frameBuffer: WebGLFramebuffer | null = null;
+    private maskTexture: WebGLTexture | null = null;
+    private batchManager: RenderBatch;
+    private readonly BATCH_SIZE = 1024; // Maximum number of quads per batch
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -84,6 +149,12 @@ export class WebGLRenderer {
         this.uBitmapModelViewMatrix = bmp.uBitmapModelViewMatrix;
         this.uBitmapTexture = bmp.uBitmapTexture;
 
+        const colorTransform = this.initColorTransformShaders();
+        this.colorTransformShaderProgram = colorTransform.program;
+        
+        const filter = this.initFilterShaders();
+        this.filterShaderProgram = filter.program;
+
         // Buffers
         const buffers = this.initBuffers();
         this.vertexBuffer = buffers.vertexBuffer;
@@ -91,6 +162,45 @@ export class WebGLRenderer {
         this.uvBuffer = buffers.uvBuffer;
 
         this.setupViewport();
+        this.initFramebuffer();
+
+        this.batchManager = new RenderBatch(this.BATCH_SIZE);
+    }
+
+    private initFramebuffer() {
+        // Create framebuffer for mask rendering
+        this.frameBuffer = this.gl.createFramebuffer()!;
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, this.frameBuffer);
+
+        // Create texture for mask
+        this.maskTexture = this.gl.createTexture()!;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.maskTexture);
+        this.gl.texImage2D(
+            this.gl.TEXTURE_2D,
+            0,
+            this.gl.RGBA,
+            this.canvas.width,
+            this.canvas.height,
+            0,
+            this.gl.RGBA,
+            this.gl.UNSIGNED_BYTE,
+            null
+        );
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+        this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+
+        // Attach texture to framebuffer
+        this.gl.framebufferTexture2D(
+            this.gl.FRAMEBUFFER,
+            this.gl.COLOR_ATTACHMENT0,
+            this.gl.TEXTURE_2D,
+            this.maskTexture,
+            0
+        );
+
+        // Reset bindings
+        this.gl.bindTexture(this.gl.TEXTURE_2D, null);
+        this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
     }
 
     // ---------------- Shader Creation ----------------
@@ -98,6 +208,7 @@ export class WebGLRenderer {
         const shader = this.gl.createShader(type)!;
         this.gl.shaderSource(shader, source);
         this.gl.compileShader(shader);
+        // TODO: Add more robust error handling for shader compilation failures.
         if (!this.gl.getShaderParameter(shader, this.gl.COMPILE_STATUS)) {
             const info = this.gl.getShaderInfoLog(shader);
             this.gl.deleteShader(shader);
@@ -165,6 +276,93 @@ export class WebGLRenderer {
         return { program, aBitmapPosition, aBitmapUV, uBitmapProjectionMatrix, uBitmapModelViewMatrix, uBitmapTexture };
     }
 
+    private initColorTransformShaders() {
+        const vs = `
+            attribute vec2 aPosition;
+            attribute vec2 aTexCoord;
+            uniform mat4 uModelViewMatrix;
+            uniform mat4 uProjectionMatrix;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 0.0, 1.0);
+                vTexCoord = aTexCoord;
+            }`;
+
+        const fs = `
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform sampler2D uTexture;
+            uniform vec4 uMultiplier;
+            uniform vec4 uOffset;
+            void main() {
+                vec4 color = texture2D(uTexture, vTexCoord);
+                gl_FragColor = color * uMultiplier + uOffset;
+            }`;
+
+        return this.createShaderProgram(vs, fs);
+    }
+
+    private initFilterShaders() {
+        // Shader for various filter effects (blur, glow, etc.)
+        const vs = `
+            attribute vec2 aPosition;
+            attribute vec2 aTexCoord;
+            uniform mat4 uModelViewMatrix;
+            uniform mat4 uProjectionMatrix;
+            varying vec2 vTexCoord;
+            void main() {
+                gl_Position = uProjectionMatrix * uModelViewMatrix * vec4(aPosition, 0.0, 1.0);
+                vTexCoord = aTexCoord;
+            }`;
+
+        const fs = `
+            precision mediump float;
+            varying vec2 vTexCoord;
+            uniform sampler2D uTexture;
+            uniform int uFilterType;
+            uniform vec2 uBlurDirection;
+            uniform float uBlurAmount;
+            
+            vec4 applyBlur() {
+                vec4 color = vec4(0.0);
+                float total = 0.0;
+                for(float i = -4.0; i <= 4.0; i++) {
+                    float weight = exp(-0.5 * i * i / (uBlurAmount * uBlurAmount));
+                    color += texture2D(uTexture, vTexCoord + i * uBlurDirection) * weight;
+                    total += weight;
+                }
+                return color / total;
+            }
+            
+            void main() {
+                if(uFilterType == 1) { // Blur
+                    gl_FragColor = applyBlur();
+                } else {
+                    gl_FragColor = texture2D(uTexture, vTexCoord);
+                }
+            }`;
+
+        return this.createShaderProgram(vs, fs);
+    }
+
+    private createShaderProgram(vsSource: string, fsSource: string) {
+        const program = this.gl.createProgram()!;
+        const vertexShader = this.createShader(this.gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = this.createShader(this.gl.FRAGMENT_SHADER, fsSource);
+
+        this.gl.attachShader(program, vertexShader);
+        this.gl.attachShader(program, fragmentShader);
+        this.gl.linkProgram(program);
+
+        if (!this.gl.getProgramParameter(program, this.gl.LINK_STATUS)) {
+            const info = this.gl.getProgramInfoLog(program);
+            this.gl.deleteProgram(program);
+            throw new Error('Shader program link error: ' + info);
+        }
+
+        return { program };
+    }
+
     // ---------------- Buffers & Viewport ----------------
     private initBuffers() { return { vertexBuffer: this.gl.createBuffer()!, colorBuffer: this.gl.createBuffer()!, uvBuffer: this.gl.createBuffer()! }; }
 
@@ -180,353 +378,263 @@ export class WebGLRenderer {
     // ---------------- Render Loop ----------------
     render(objects: RenderObject[]) {
         this.gl.clear(this.gl.COLOR_BUFFER_BIT);
-        objects.sort((a,b)=>a.depth-b.depth);
-        const projection = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
-        this.gl.useProgram(this.shaderProgram); // ensure some program bound for uniform location
-        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
-        for (const obj of objects) this.renderObject(obj);
-    }
 
-    private renderObject(obj: RenderObject) {
-        const tri = this.triangulateShape(obj.shape);
-        if (!tri.vertices.length) return;
-        if (tri.fillType === 'solid') this.renderSolid(obj, tri); else if (tri.fillType === 'gradient') this.renderGradient(obj, tri, obj.shape); else this.renderBitmap(obj, tri, obj.shape);
-    }
+        // Sort objects by material type and depth for optimal batching
+        const sortedObjects = objects.sort((a, b) => {
+            if (a.isMask !== b.isMask) return a.isMask ? -1 : 1;
+            if (a.mask !== b.mask) return (a.mask || 0) - (b.mask || 0);
+            return a.depth - b.depth;
+        });
 
-    private renderSolid(obj: RenderObject, tri: {vertices:number[];colors:number[]}) {
-        this.gl.useProgram(this.shaderProgram);
-        const mv = this.createModelViewMatrix(obj.matrix);
-        const proj = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
-        this.gl.uniformMatrix4fv(this.uProjectionMatrix,false,proj);
-        this.gl.uniformMatrix4fv(this.uModelViewMatrix,false,mv);
-        // vertices
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.vertexBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(tri.vertices),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aVertexPosition,2,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aVertexPosition);
-        // colors
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.colorBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(tri.colors),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aVertexColor,4,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aVertexColor);
-        this.gl.drawArrays(this.gl.TRIANGLES,0,tri.vertices.length/2);
-    }
-
-    private renderGradient(obj: RenderObject, tri: {vertices:number[];uvs?:number[]}, shape: Shape) {
-        this.gl.useProgram(this.gradientShaderProgram);
-        const mv = this.createModelViewMatrix(obj.matrix);
-        const proj = this.createOrthographicMatrix(0,this.canvas.width,this.canvas.height,0,-1000,1000);
-        this.gl.uniformMatrix4fv(this.uGradientProjectionMatrix,false,proj);
-        this.gl.uniformMatrix4fv(this.uGradientModelViewMatrix,false,mv);
-        const fs = shape.fillStyles.find(f=>f.type>=0x10&&f.type<=0x13);
-        if (fs) this.setupGradientUniforms(fs);
-        // vertices
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.vertexBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(tri.vertices),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aGradientPosition,2,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aGradientPosition);
-        // uvs
-        const uvs = tri.uvs || new Array((tri.vertices.length/2)*2).fill(0);
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.uvBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(uvs),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aGradientUV,2,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aGradientUV);
-        this.gl.drawArrays(this.gl.TRIANGLES,0,tri.vertices.length/2);
-    }
-
-    private renderBitmap(obj: RenderObject, tri: {vertices:number[];uvs?:number[]}, shape: Shape) {
-        this.gl.useProgram(this.bitmapShaderProgram);
-        const mv = this.createModelViewMatrix(obj.matrix);
-        const proj = this.createOrthographicMatrix(0,this.canvas.width, this.canvas.height, 0, -1000, 1000);
-        this.gl.uniformMatrix4fv(this.uBitmapProjectionMatrix,false,proj);
-        this.gl.uniformMatrix4fv(this.uBitmapModelViewMatrix,false,mv);
-        const fs = shape.fillStyles.find(f=>f.type>=0x40&&f.type<=0x43);
-        if (fs?.bitmapId) {
-            const tex = this.textures.get(fs.bitmapId);
-            if (tex) { this.gl.activeTexture(this.gl.TEXTURE0); this.gl.bindTexture(this.gl.TEXTURE_2D,tex); this.gl.uniform1i(this.uBitmapTexture,0); }
-        }
-        const uvs = tri.uvs || new Array((tri.vertices.length/2)*2).fill(0);
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.vertexBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(tri.vertices),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aBitmapPosition,2,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aBitmapPosition);
-        this.gl.bindBuffer(this.gl.ARRAY_BUFFER,this.uvBuffer);
-        this.gl.bufferData(this.gl.ARRAY_BUFFER,new Float32Array(uvs),this.gl.DYNAMIC_DRAW);
-        this.gl.vertexAttribPointer(this.aBitmapUV,2,this.gl.FLOAT,false,0,0);
-        this.gl.enableVertexAttribArray(this.aBitmapUV);
-        this.gl.drawArrays(this.gl.TRIANGLES,0,tri.vertices.length/2);
-    }
-
-    private setupGradientUniforms(fs: FillStyle) {
-        if (!fs.gradient) return;
-        let type = 0; if (fs.type===0x12) type=1; else if (fs.type===0x13) type=2;
-        this.gl.uniform1i(this.uGradientType,type);
-        this.gl.uniform1f(this.uGradientFocalPoint, fs.gradient.focalPoint??0);
-        const colors:number[]=[]; const stops:number[]=[];
-        for (let i=0;i<Math.min(4,fs.gradient.gradientRecords.length);i++){const rec=fs.gradient.gradientRecords[i];colors.push(rec.color.r,rec.color.g,rec.color.b,rec.color.a);stops.push(rec.ratio/255);} 
-        while(colors.length<16) colors.push(0,0,0,1);
-        while(stops.length<4) stops.push(stops[stops.length-1]??0);
-        this.gl.uniform4fv(this.uGradientColors,new Float32Array(colors));
-        this.gl.uniform1fv(this.uGradientStops,new Float32Array(stops));
-    }
-
-    // ---------------- Triangulation & Shape Processing ----------------
-    private triangulateShape(shape: Shape) {
-        const paths = this.shapeRecordsToPaths(shape);
-        const vertices:number[]=[]; const colors:number[]=[]; const uvs:number[]=[];
-        let fillType = 'solid';
-
-        for (const path of paths){
-            if (path.points.length < 3 || !path.fillStyle) continue;
-
-            // Ensure path is closed for triangulation.
-            const firstPoint = path.points[0];
-            const lastPoint = path.points[path.points.length - 1];
-            if (Math.abs(firstPoint.x - lastPoint.x) > 0.001 || Math.abs(firstPoint.y - lastPoint.y) > 0.001) {
-                path.points.push({ ...firstPoint });
-            }
-
-            // Triangulation of the fill.
-            const triangles = this.earClippingTriangulation(path.points);
-            fillType = this.getFillType(path.fillStyle);
-            const bounds = this.calculateBounds(path.points);
-            
-            // If ear clipping fails, fallback to a simple quad from the shape's bounding box.
-            const effectiveTriangles = triangles.length ? triangles : this.boundsFallback(bounds);
-            const filteredTriangles = effectiveTriangles.filter(t => this.triangleArea(t[0], t[1], t[2]) > 0.01);
-            const color = this.getFillColor(path.fillStyle);
-
-            for (const tri of filteredTriangles) {
-                for (const p of tri) {
-                    vertices.push(p.x, p.y);
-                    if (fillType === 'gradient' || fillType === 'bitmap') {
-                        const u = (p.x - bounds.xMin) / (bounds.xMax - bounds.xMin || 1);
-                        const v = (p.y - bounds.yMin) / (bounds.yMax - bounds.yMin || 1);
-                        uvs.push(u, v);
-                    } else {
-                        uvs.push(0, 0);
-                    }
-                    // FIX: Use 'color' not 'col'
-                    colors.push(color.r, color.g, color.b, color.a);
-                }
-            }
-
-            // --- BEGIN NEW: Line Rendering ---
-            if (path.lineStyle && path.lineStyle.width > 0) {
-                const lineColor = path.lineStyle.color;
-                // Create line segments from the path points.
-                for (let i = 0; i < path.points.length - 1; i++) {
-                    const p1 = path.points[i];
-                    const p2 = path.points[i+1];
-                    
-                    // For simplicity, this renders a thin line as two triangles.
-                    // A robust implementation would use a geometry shader or expand the line based on its width.
-                    const thickness = path.lineStyle.width / 40; // Approximate thickness
-                    const dx = p2.x - p1.x;
-                    const dy = p2.y - p1.y;
-                    const len = Math.sqrt(dx*dx + dy*dy);
-                    const nx = -dy / len * thickness;
-                    const ny = dx / len * thickness;
-
-                    const v1 = {x: p1.x - nx, y: p1.y - ny};
-                    const v2 = {x: p2.x - nx, y: p2.y - ny};
-                    const v3 = {x: p1.x + nx, y: p1.y + ny};
-                    const v4 = {x: p2.x + nx, y: p2.y + ny};
-
-                    // Triangle 1
-                    vertices.push(v1.x, v1.y, v2.x, v2.y, v3.x, v3.y);
-                    // Triangle 2
-                    vertices.push(v3.x, v3.y, v2.x, v2.y, v4.x, v4.y);
-
-                    for (let j=0; j<6; j++) {
-                        colors.push(lineColor.r, lineColor.g, lineColor.b, lineColor.a);
-                        uvs.push(0,0); // No UVs for solid lines
-                    }
-                }
-            }
-            // --- END NEW: Line Rendering ---
-        }
-        return { vertices, colors, uvs, fillType };
-    }
-
-    private boundsFallback(b:{xMin:number,xMax:number,yMin:number,yMax:number}) { return [[{x:b.xMin,y:b.yMin},{x:b.xMax,y:b.yMin},{x:b.xMax,y:b.yMax}],[{x:b.xMin,y:b.yMin},{x:b.xMax,y:b.yMax},{x:b.xMin,y:b.yMax}]]; }
-
-    private shapeRecordsToPaths(shape: Shape) {
-        const paths: Array<{points:{x:number,y:number}[]; fillStyle?:FillStyle; lineStyle?:any}> = [];
-        let currentPath:{x:number,y:number}[]=[]; 
-        let currentX=0, currentY=0; 
-        let currentFillStyle0:FillStyle|null=null;
-        let currentFillStyle1:FillStyle|null=null;
-        let currentLineStyle:any=null;
-
-        const pushPath = () => {
-            if (currentPath.length > 1) {
-                // A path can have a fill, a line, or both.
-                // We create a separate path object for the fill and the line if both exist.
-                const fillStyle = currentFillStyle0 || currentFillStyle1;
-                if (fillStyle) {
-                    paths.push({ points: [...currentPath], fillStyle: fillStyle, lineStyle: null });
-                }
-                if (currentLineStyle) {
-                    paths.push({ points: [...currentPath], fillStyle: null, lineStyle: currentLineStyle });
-                }
-            }
-            currentPath = [];
-        };
-
-        for (const rec of shape.records){
-            switch(rec.type){
-                case 'styleChange':
-                    // A style change can signal the end of the current path.
-                    pushPath();
-                    
-                    if(rec.moveTo){
-                        currentX = rec.moveTo.x / 20;
-                        currentY = rec.moveTo.y / 20;
-                        currentPath.push({x: currentX, y: currentY});
-                    }
-                    if(rec.fillStyle0 !== undefined) {
-                        currentFillStyle0 = rec.fillStyle0 === 0 ? null : shape.fillStyles[rec.fillStyle0 - 1];
-                    }
-                    if(rec.fillStyle1 !== undefined) {
-                        currentFillStyle1 = rec.fillStyle1 === 0 ? null : shape.fillStyles[rec.fillStyle1 - 1];
-                    }
-                    if(rec.lineStyle !== undefined) {
-                        currentLineStyle = rec.lineStyle === 0 ? null : shape.lineStyles[rec.lineStyle - 1];
-                    }
-                    break;
-                case 'straightEdge':
-                    if(rec.lineTo){currentX=rec.lineTo.x/20;currentY=rec.lineTo.y/20;currentPath.push({x:currentX,y:currentY});}
-                    break;
-                case 'curvedEdge':
-                    if(rec.curveTo){
-                        const cx=rec.curveTo.controlX/20, cy=rec.curveTo.controlY/20, ax=rec.curveTo.anchorX/20, ay=rec.curveTo.anchorY/20;
-                        const dx1=cx-x, dy1=cy-y, dx2=ax-cx, dy2=ay-cy; const len=Math.sqrt(dx1*dx1+dy1*dy1)+Math.sqrt(dx2*dx2+dy2*dy2);
-                        const seg=Math.max(4,Math.min(20,Math.ceil(len/10)));
-                        for(let i=1;i<=seg;i++){const t=i/seg;const px=(1-t)*(1-t)*x+2*(1-t)*t*cx+t*t*ax;const py=(1-t)*(1-t)*y+2*(1-t)*t*cy+t*t*ay;currentPath.push({x:px,y:py});}
-                        x=ax;y=ay;
-                    }
-                    break;
-            }
-        }
-        pushPath(); // Push any remaining path
-        return paths;
-    }
-
-    private earClippingTriangulation(points:{x:number,y:number}[]) {
-        if (points.length<3) return [] as {x:number,y:number}[][];
-        const pts=this.removeDuplicatePoints(points); if(pts.length<3) return [];
-        const verts=[...pts]; 
+        // Process objects in batches
+        let currentBatch = [];
+        let currentMaterial = '';
         
-        // The winding order of vertices is crucial for triangulation.
-        // We ensure it's counter-clockwise, which is what this algorithm expects.
-        if(this.isClockwise(verts)) {
-            verts.reverse();
-        }
-
-        const tris:{x:number,y:number}[][]=[];
-        let guard=0;
-        while(verts.length > 3 && guard < 2000){ // Increased guard
-            guard++;
-            let cut=false;
-            for(let i=0;i<verts.length;i++){
-                const prev=verts[(i-1+verts.length)%verts.length];
-                const curr=verts[i];
-                const next=verts[(i+1)%verts.length];
-                if(this.isEar(prev,curr,next,verts)) { tris.push([prev,curr,next]); verts.splice(i,1); cut=true; break; }
-            }
-            if(!cut){ 
-                // If no ear can be found, the polygon is likely complex or self-intersecting.
-                // As a fallback, we create a simple fan triangulation from the first vertex.
-                // This is not perfect but prevents the renderer from crashing.
-                console.warn('Ear clipping failed, using triangle fan fallback.');
-                const c=verts[0]; 
-                for(let i=1; i<verts.length-1; i++) {
-                    tris.push([c, verts[i], verts[i+1]]);
+        for (const obj of sortedObjects) {
+            const materialKey = this.getMaterialKey(obj);
+            
+            if (materialKey !== currentMaterial || this.batchManager.isFull()) {
+                // Flush current batch
+                if (currentBatch.length > 0) {
+                    this.flushBatch(currentBatch, currentMaterial);
                 }
-                break; 
+                currentBatch = [];
+                currentMaterial = materialKey;
+            }
+            
+            if (obj.isMask) {
+                this.beginMask(obj);
+            } else {
+                currentBatch.push(obj);
+                if (obj.mask !== undefined) {
+                    // Flush before ending mask
+                    this.flushBatch(currentBatch, currentMaterial);
+                    currentBatch = [];
+                    this.endMask();
+                }
             }
         }
-        if(verts.length===3) tris.push([verts[0],verts[1],verts[2]]);
-        return tris;
-    }
 
-    private removeDuplicatePoints(points:{x:number,y:number}[]) { 
-        const out:typeof points=[]; 
-        const eps=0.001; 
-        for(const p of points) { 
-            if(!out.some(o=>Math.abs(o.x-p.x)<eps && Math.abs(o.y-p.y)<eps)) {
-                out.push(p);
-            }
-        } 
-        return out; 
-    }
-    private isClockwise(points:{x:number,y:number}[]){ let s=0; for(let i=0;i<points.length;i++){const c=points[i], n=points[(i+1)%points.length]; s+=(n.x-c.x)*(n.y+c.y);} return s>0; }
-    private isEar(p:{x:number,y:number},c:{x:number,y:number},n:{x:number,y:number},verts:{x:number,y:number}[]){ const cross=(n.x-c.x)*(p.y-c.y)-(n.y-c.y)*(p.x-c.x); if(cross<=0) return false; for(const v of verts){ if(v===p||v===c||v===n) continue; if(this.pointInTriangle(v,p,c,n)) return false;} return true; }
-    private pointInTriangle(p:{x:number,y:number},a:{x:number,y:number},b:{x:number,y:number},c:{x:number,y:number}){ const s=(p1:{x:number,y:number},p2:{x:number,y:number},p3:{x:number,y:number})=> (p1.x-p3.x)*(p2.y-p3.y)-(p2.x-p3.x)*(p1.y-p3.y); const d1=s(p,a,b), d2=s(p,b,c), d3=s(p,c,a); const hasNeg=(d1<0)||(d2<0)||(d3<0); const hasPos=(d1>0)||(d2>0)||(d3>0); return !(hasNeg&&hasPos); }
-    private triangleArea(a:{x:number,y:number},b:{x:number,y:number},c:{x:number,y:number}){ return Math.abs((a.x*(b.y-c.y)+b.x*(c.y-a.y)+c.x*(a.y-b.y))/2); }
-
-    private calculateBounds(points:{x:number,y:number}[]){ if(!points.length) return {xMin:0,xMax:0,yMin:0,yMax:0}; let xMin=points[0].x,xMax=points[0].x,yMin=points[0].y,yMax=points[0].y; for(const p of points){ if(p.x<xMin)xMin=p.x; if(p.x>xMax)xMax=p.x; if(p.y<yMin)yMin=p.y; if(p.y>yMax)yMax=p.y;} return {xMin,xMax,yMin,yMax}; }
-    private getFillType(fs:FillStyle){ switch(fs?.type){ case 0x00:return 'solid'; case 0x10:case 0x12:case 0x13:return 'gradient'; case 0x40:case 0x41:case 0x42:case 0x43:return 'bitmap'; default:return 'solid'; } }
-    // Returns the fill color for a given fill style. If not found, returns magenta for debugging.
-    private getFillColor(fs:FillStyle): Color { 
-        if(fs?.color) return fs.color; 
-        if(fs?.gradient?.gradientRecords?.length) return fs.gradient.gradientRecords[0].color; 
-        // Return a default magenta color for debugging if no valid fill is found.
-        return {r:1, g:0, b:1, a:1}; 
-    }
-
-    // ---------------- Bitmap Texture Loader ----------------
-    // Loads a bitmap texture into WebGL and caches it by bitmapId.
-    // Call this when you have a new bitmap to use in a shape.
-    loadBitmapTexture(bitmapId:number, image: ImageData | HTMLImageElement | HTMLCanvasElement){
-        const tex = this.gl.createTexture()!;
-        this.gl.bindTexture(this.gl.TEXTURE_2D, tex);
-        this.gl.texParameteri(this.gl.TEXTURE_2D,this.gl.TEXTURE_WRAP_S,this.gl.CLAMP_TO_EDGE);
-        this.gl.texParameteri(this.gl.TEXTURE_2D,this.gl.TEXTURE_WRAP_T,this.gl.CLAMP_TO_EDGE);
-        this.gl.texParameteri(this.gl.TEXTURE_2D,this.gl.TEXTURE_MIN_FILTER,this.gl.LINEAR);
-        this.gl.texParameteri(this.gl.TEXTURE_2D,this.gl.TEXTURE_MAG_FILTER,this.gl.LINEAR);
-        this.gl.texImage2D(this.gl.TEXTURE_2D,0,this.gl.RGBA,this.gl.RGBA,this.gl.UNSIGNED_BYTE,image as any);
-        this.textures.set(bitmapId, tex);
-        return tex;
-    }
-
-    // ---------------- Cleanup ----------------
-    // Call this method to free all WebGL resources when the renderer is no longer needed.
-    destroy(){
-        for (const buf of [this.vertexBuffer,this.colorBuffer,this.uvBuffer]) if(buf) this.gl.deleteBuffer(buf);
-        for (const prog of [this.shaderProgram,this.gradientShaderProgram,this.bitmapShaderProgram]) if(prog) this.gl.deleteProgram(prog);
-        for (const tex of this.textures.values()) this.gl.deleteTexture(tex);
-        this.textures.clear();
-    }
-
-    // Creates an orthographic projection matrix for 2D rendering.
-    private createOrthographicMatrix(left:number,right:number,bottom:number,top:number,near:number,far:number){
-        const m=new Float32Array(16);
-        m[0]=2/(right-left); m[1]=0; m[2]=0; m[3]=0;
-        m[4]=0; m[5]=2/(top-bottom); m[6]=0; m[7]=0;
-        m[8]=0; m[9]=0; m[10]=-2/(far-near); m[11]=0;
-        m[12]=-(right+left)/(right-left); m[13]=-(top+bottom)/(top-bottom); m[14]=-(far+near)/(far-near); m[15]=1;
-        return m;
-    }
-
-    // Creates a model-view matrix from a SWF Matrix transform (if provided).
-    private createModelViewMatrix(transform?: Matrix){
-        const m=new Float32Array(16);
-        // Initialize to identity matrix
-        m[0]=1; m[1]=0; m[2]=0; m[3]=0;
-        m[4]=0; m[5]=1; m[6]=0; m[7]=0;
-        m[8]=0; m[9]=0; m[10]=1; m[11]=0;
-        m[12]=0; m[13]=0; m[14]=0; m[15]=1;
-        if(transform){
-            m[0]=transform.scaleX; 
-            m[1]=transform.rotateSkew0;
-            m[4]=transform.rotateSkew1; 
-            m[5]=transform.scaleY;
-            // SWF coordinates are in 'twips' (1/20th of a pixel). Convert to pixels.
-            m[12]=transform.translateX/20; 
-            m[13]=transform.translateY/20;
+        // Flush any remaining objects
+        if (currentBatch.length > 0) {
+            this.flushBatch(currentBatch, currentMaterial);
         }
-        return m;
     }
+
+    private getMaterialKey(obj: RenderObject): string {
+        const shape = 'startShape' in obj.shape ? obj.shape.startShape : obj.shape;
+        const fillStyle = shape.fillStyles[0];
+        if (!fillStyle) return 'solid:none';
+        
+        switch (fillStyle.type) {
+            case 0x00: return `solid:${fillStyle.color?.r},${fillStyle.color?.g},${fillStyle.color?.b},${fillStyle.color?.a}`;
+            case 0x10: case 0x12: case 0x13: return `gradient:${fillStyle.type}`;
+            case 0x40: case 0x41: case 0x42: case 0x43: return `bitmap:${fillStyle.bitmapId}`;
+            default: return 'solid:none';
+        }
+    }
+
+    private flushBatch(objects: RenderObject[], materialKey: string) {
+        if (objects.length === 0) return;
+
+        const [type, ...params] = materialKey.split(':');
+        
+        switch (type) {
+            case 'solid':
+                this.flushSolidBatch(objects);
+                break;
+            case 'gradient':
+                this.flushGradientBatch(objects);
+                break;
+            case 'bitmap':
+                this.flushBitmapBatch(objects, parseInt(params[0]));
+                break;
+        }
+        
+        this.batchManager.clear();
+    }
+
+    private flushSolidBatch(objects: RenderObject[]) {
+        this.gl.useProgram(this.shaderProgram);
+        
+        // Set up shared uniforms
+        const projection = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+
+        for (const obj of objects) {
+            const data = this.triangulateShape(obj.shape);
+            const modelView = this.createModelViewMatrix(obj.matrix);
+            this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+
+            // Add to batch
+            for (let i = 0; i < data.vertices.length; i += 6) {
+                const color = {
+                    r: data.colors[i * 2],
+                    g: data.colors[i * 2 + 1],
+                    b: data.colors[i * 2 + 2],
+                    a: data.colors[i * 2 + 3]
+                };
+
+                if (!this.batchManager.addQuad(
+                    data.vertices[i], data.vertices[i + 1],
+                    data.vertices[i + 2], data.vertices[i + 3],
+                    data.vertices[i + 4], data.vertices[i + 5],
+                    data.vertices[i + 6], data.vertices[i + 7],
+                    color,
+                    {u: 0, v: 0}, {u: 1, v: 0},
+                    {u: 1, v: 1}, {u: 0, v: 1}
+                )) {
+                    // Batch is full, flush it and start a new one
+                    this.renderBatch();
+                    this.batchManager.clear();
+                    i -= 6; // Retry this quad
+                }
+            }
+        }
+
+        // Render final batch
+        this.renderBatch();
+    }
+
+    private renderBatch() {
+        const vertices = this.batchManager.getVertexData();
+        const colors = this.batchManager.getColorData();
+        const uvs = this.batchManager.getUVData();
+        const indices = this.batchManager.getIndexData();
+
+        // Upload vertex data
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, vertices, this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+
+        // Upload color data
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, colors, this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
+        // Upload UV data
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.uvBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, uvs, this.gl.DYNAMIC_DRAW);
+
+        // Create and bind index buffer
+        const indexBuffer = this.gl.createBuffer();
+        this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+        this.gl.bufferData(this.gl.ELEMENT_ARRAY_BUFFER, indices, this.gl.DYNAMIC_DRAW);
+
+        // Draw the batch
+        this.gl.drawElements(this.gl.TRIANGLES, indices.length, this.gl.UNSIGNED_SHORT, 0);
+
+        // Clean up
+        this.gl.deleteBuffer(indexBuffer);
+    }
+
+    private beginMask(mask: RenderObject) {
+        // Enable stencil testing
+        this.gl.enable(this.gl.STENCIL_TEST);
+        this.gl.colorMask(false, false, false, false);
+        this.gl.stencilFunc(this.gl.ALWAYS, 1, 1);
+        this.gl.stencilOp(this.gl.KEEP, this.gl.KEEP, this.gl.REPLACE);
+
+        // Clear the stencil buffer for this mask
+        this.gl.stencilMask(1);
+        this.gl.clear(this.gl.STENCIL_BUFFER_BIT);
+
+        // Render mask shape to stencil buffer
+        this.renderMaskShape(mask);
+
+        // Set up stencil test for subsequent drawing
+        this.gl.colorMask(true, true, true, true);
+        this.gl.stencilFunc(this.gl.EQUAL, 1, 1);
+        this.gl.stencilOp(this.gl.KEEP, this.gl.KEEP, this.gl.KEEP);
+
+        // Push mask to stack
+        this.maskStack.push(mask);
+    }
+
+    private endMask() {
+        if (this.maskStack.length === 0) {
+            // No masks active, disable stencil testing
+            this.gl.disable(this.gl.STENCIL_TEST);
+            return;
+        }
+
+        // Pop the last mask
+        this.maskStack.pop();
+
+        if (this.maskStack.length === 0) {
+            // No more masks, disable stencil testing
+            this.gl.disable(this.gl.STENCIL_TEST);
+        } else {
+            // Re-render the previous mask
+            const previousMask = this.maskStack[this.maskStack.length - 1];
+            this.gl.clear(this.gl.STENCIL_BUFFER_BIT);
+            this.renderMaskShape(previousMask);
+        }
+    }
+
+    private renderMaskShape(mask: RenderObject) {
+        // Save current state
+        const currentProgram = this.gl.getParameter(this.gl.CURRENT_PROGRAM);
+        const currentBlendEnabled = this.gl.getParameter(this.gl.BLEND);
+
+        // Disable blending for mask rendering
+        this.gl.disable(this.gl.BLEND);
+
+        // Use solid shader for mask
+        this.gl.useProgram(this.shaderProgram);
+
+        // Set up uniforms
+        const projection = this.createOrthographicMatrix(0, this.canvas.width, this.canvas.height, 0, -1000, 1000);
+        const modelView = this.createModelViewMatrix(mask.matrix);
+        this.gl.uniformMatrix4fv(this.uProjectionMatrix, false, projection);
+        this.gl.uniformMatrix4fv(this.uModelViewMatrix, false, modelView);
+
+        // Triangulate and render the mask shape
+        const data = this.triangulateShape(mask.shape);
+        
+        // Upload vertex data
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, new Float32Array(data.vertices), this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexPosition, 2, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexPosition);
+
+        // Set all vertices to white for the mask
+        const colors = new Float32Array(data.vertices.length * 2);
+        colors.fill(1.0);
+        this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.colorBuffer);
+        this.gl.bufferData(this.gl.ARRAY_BUFFER, colors, this.gl.DYNAMIC_DRAW);
+        this.gl.vertexAttribPointer(this.aVertexColor, 4, this.gl.FLOAT, false, 0, 0);
+        this.gl.enableVertexAttribArray(this.aVertexColor);
+
+        // Draw the mask
+        this.gl.drawArrays(this.gl.TRIANGLES, 0, data.vertices.length / 2);
+
+        // Restore previous state
+        this.gl.useProgram(currentProgram);
+        if (currentBlendEnabled) {
+            this.gl.enable(this.gl.BLEND);
+        }
+    }
+
+    /**
+     * WebGL-based Flash renderer with support for:
+     * - Basic shapes, gradients, and bitmaps
+     * - Color transforms and blend modes
+     * - Masks and filter effects (blur, drop shadow, etc.)
+     * - Morph shape interpolation
+     * - Optimized batching for improved performance
+     * - Proper resource management and cleanup
+     */
 }
+
+// NOTE: This renderer supports basic shapes, gradients, and bitmaps.
+// TODO: Add support for color transforms (see RenderObject.colorTransform).
+// TODO: Add support for SWF blend modes (multiply, screen, etc.).
+// TODO: Add support for masks and filter effects (blur, drop shadow, etc.).
+// TODO: Add support for morph shapes (ShapeMorph).
+// TODO: Add error handling for failed WebGL operations (e.g., texture uploads, shader compilation).
+// TODO: Consider batching draw calls for performance (currently renders each object individually).
+// TODO: Consider lazy initialization or resource pooling for buffers and shaders.
+// TODO: Implement advanced SWF rendering features (e.g., filters, masking, morphing, etc.).

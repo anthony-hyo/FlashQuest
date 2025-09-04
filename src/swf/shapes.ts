@@ -356,3 +356,4 @@ function readColor(data: Bytes, hasAlpha: boolean): Color {
 
     return { r, g, b, a };
 }
+
